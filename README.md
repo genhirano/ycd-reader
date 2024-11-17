@@ -1,6 +1,12 @@
 # ycd_reader
 
-One Paragraph of project description goes here
+Load the "YCD" file.
+
+## What "YCD" file?
+
+y-cruncher is a program that can compute Pi and other constants to trillions of digits.
+
+The "YCD" file is a format for result data output by the Y-Cruncher program.
 
 ## Getting Started
 
