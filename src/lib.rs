@@ -1,49 +1,40 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::collections::HashMap;
-use std::fmt;
+
+use strum_macros::{AsRefStr, EnumString};
+
+
+// const char YCF_CDF_FileVersion[]        =   "1.1.0";
+// const char YCF_CDF_TOKEN_FileVersion[]  =   "FileVersion:";
+// const char YCF_CDF_TOKEN_Base[]         =   "Base:";
+// const char YCF_CDF_TOKEN_FirstDigits[]  =   "FirstDigits:";
+// const char YCF_CDF_TOKEN_TotalDigits[]  =   "TotalDigits:";
+// const char YCF_CDF_TOKEN_BlockSize[]    =   "Blocksize:";
+// const char YCF_CDF_TOKEN_TotalBlocks[]  =   "TotalBlocks:";
+// const char YCF_CDF_TOKEN_BlockID[]      =   "BlockID:";
+// const char YCF_CDF_TOKEN_EndHeader[]    =   "EndHeader";
 
 
 // YCDヘッダー情報の列挙型
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, AsRefStr, EnumString)]
 pub enum YcdHeaderInfoElem {
     FileVersion,
     Base,
     FirstDigits,
     TotalDigits,
-    BlockSize,
-    BlockId,
-}
-
-impl fmt::Display for YcdHeaderInfoElem {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", match self {
-            YcdHeaderInfoElem::FileVersion => "FileVersion",
-            YcdHeaderInfoElem::Base => "Base",
-            YcdHeaderInfoElem::FirstDigits => "FirstDigits",
-            YcdHeaderInfoElem::TotalDigits => "TotalDigits",
-            YcdHeaderInfoElem::BlockSize => "Blocksize",
-            YcdHeaderInfoElem::BlockId => "BlockID",
-        })
-    }
-}
-
-// ファイル情報の列挙型
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum FileInfo {
-    BlockIndex,
-    FirstData,
-    FirstDigit,
-    EndDigit,
-    FileSize,
+    TotalBlocks,
+    Blocksize,
+    BlockID,
+    EndHeader,
 }
 
 // 処理ユニット構造体
 #[derive(Debug)]
 pub struct YcdProcessUnit {
-    process_no: i64,
-    start_digit: i64,
-    value: String,
+    pub process_no: i64,
+    pub start_digit: i64,
+    pub value: String,
 }
 
 impl YcdProcessUnit {
@@ -79,11 +70,11 @@ impl YcdSeqBlockStream {
         }
 
         let header_info = YcdFileUtil::get_ycd_header(file_name)?;
-        let digit_length = header_info.get(&YcdHeaderInfoElem::BlockSize)
+        let digit_length = header_info.get(&YcdHeaderInfoElem::Blocksize)
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid block size"))?;
 
-        let block_id = header_info.get(&YcdHeaderInfoElem::BlockId)
+        let block_id = header_info.get(&YcdHeaderInfoElem::BlockID)
             .and_then(|s| s.parse::<i32>().ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid block ID"))?;
 
@@ -115,7 +106,10 @@ impl YcdSeqBlockStream {
         let header_size = YcdFileUtil::get_header_size(&self.file_path)?;
         let file = File::open(&self.file_path)?;
         let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(u64::try_from(header_size + 1).unwrap()))?;
+        
+        // Seek to the end of the header
+        reader.seek(SeekFrom::Start(u64::try_from(header_size).unwrap()))?;
+        
         self.file_stream = Some(reader);
         self.is_closed = false;
         Ok(())
@@ -172,7 +166,9 @@ impl YcdSeqBlockStream {
     }
 
     fn next_block_read(&mut self) -> io::Result<String> {
+        
         let mut buffer = [0u8; 8];
+        
         if let Some(stream) = self.file_stream.as_mut() {
             stream.read_exact(&mut buffer)?;
         } else {
@@ -255,12 +251,12 @@ impl YcdFileUtil {
             }
 
             let key = match parts[0].trim() {
-                "FileVersion" => Some(YcdHeaderInfoElem::FileVersion),
-                "Base" => Some(YcdHeaderInfoElem::Base),
-                "FirstDigits" => Some(YcdHeaderInfoElem::FirstDigits),
-                "TotalDigits" => Some(YcdHeaderInfoElem::TotalDigits),
-                "Blocksize" => Some(YcdHeaderInfoElem::BlockSize),
-                "BlockID" => Some(YcdHeaderInfoElem::BlockId),
+                s if s == YcdHeaderInfoElem::FileVersion.as_ref() => Some(YcdHeaderInfoElem::FileVersion),
+                s if s == YcdHeaderInfoElem::Base.as_ref() => Some(YcdHeaderInfoElem::Base),
+                s if s == YcdHeaderInfoElem::FirstDigits.as_ref() => Some(YcdHeaderInfoElem::FirstDigits),
+                s if s == YcdHeaderInfoElem::TotalDigits.as_ref() => Some(YcdHeaderInfoElem::TotalDigits),
+                s if s == YcdHeaderInfoElem::Blocksize.as_ref() => Some(YcdHeaderInfoElem::Blocksize),
+                s if s == YcdHeaderInfoElem::BlockID.as_ref() => Some(YcdHeaderInfoElem::BlockID),
                 _ => None,
             };
 
@@ -273,10 +269,11 @@ impl YcdFileUtil {
            map.contains_key(&YcdHeaderInfoElem::Base) &&
            map.contains_key(&YcdHeaderInfoElem::FirstDigits) &&
            map.contains_key(&YcdHeaderInfoElem::TotalDigits) &&
-           map.contains_key(&YcdHeaderInfoElem::BlockSize) &&
-           map.contains_key(&YcdHeaderInfoElem::BlockId) {
+           map.contains_key(&YcdHeaderInfoElem::Blocksize) &&
+           map.contains_key(&YcdHeaderInfoElem::BlockID) {
             Ok(map)
         } else {
+            println!("{:?}", map);
             Err(io::Error::new(io::ErrorKind::InvalidData, "Missing required header fields"))
         }
     }
