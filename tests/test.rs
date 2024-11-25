@@ -9,6 +9,8 @@ mod tests {
 
     #[test]
     fn test_get_header_size() {
+
+        // ----- 1000000 Digits YCD -----
         let file_name = &format!("{}1000000{}0{}", BASE_PATH, BASE_FILENAME, BASE_EXT);
         let header_size = ycd_reader::YcdFileUtil::get_header_size(file_name);
         assert_eq!(header_size.unwrap(), 195);
@@ -21,7 +23,7 @@ mod tests {
         let header_size = ycd_reader::YcdFileUtil::get_header_size(file_name);
         assert_eq!(header_size.unwrap(), 196); // 195 + 1  桁が増えるとヘッダーが1バイト増える
 
-        // ----- 2000000桁 -----
+        // ----- 2000000 Digits YCD -----
         let file_name = &format!("{}2000000{}0{}", BASE_PATH, BASE_FILENAME, BASE_EXT);
         let header_size = ycd_reader::YcdFileUtil::get_header_size(file_name);
         assert_eq!(header_size.unwrap(), 195);
