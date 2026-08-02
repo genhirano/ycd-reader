@@ -1,94 +1,82 @@
 # ycd_reader
 
-Load the "YCD" file.
+`ycd_reader` is a Rust library for reading base-10 compressed digit files
+(`.ycd`) produced by y-cruncher.
 
-## What "YCD" file?
+Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
+little-endian block. The library restores those blocks to digit strings and
+returns them in caller-selected processing units.
 
-y-cruncher is a program that can compute Pi and other constants to trillions of digits.
+## Single-file reading
 
-The "YCD" file is a format for result data output by the Y-Cruncher program.
+```rust
+use std::io;
+use ycd_reader::YcdSeqBlockStream;
 
-## Getting Started
+fn main() -> io::Result<()> {
+    let mut stream = YcdSeqBlockStream::new("digits-0.ycd", 1_000)?;
 
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See deployment for notes on how to deploy the project on a live system.
+    while stream.has_next() {
+        let unit = stream.next()?;
+        println!(
+            "unit {} starts at digit {} and contains {} digits",
+            unit.process_no,
+            unit.start_digit,
+            unit.value.len()
+        );
+    }
 
-### Prerequisites
-
-What things you need to install the software and how to install them
-
-```
-Give examples
-```
-
-### Installing
-
-A step by step series of examples that tell you how to get a development env running
-
-Say what the step will be
-
-```
-Give the example
-```
-
-And repeat
-
-```
-until finished
+    Ok(())
+}
 ```
 
-End with an example of getting some data out of the system or using it for a little demo
+The processing-unit size must be at least 19. The final unit can be shorter
+than the requested size.
 
-## Running the tests
+## Reading contiguous files
 
-Explain how to run the automated tests for this system
+`YcdMultiFileStream` joins an explicit ordered list of YCD files. It validates
+that each file starts immediately after the preceding file and allows a
+processing unit to cross file boundaries.
 
-### Break down into end to end tests
+```rust
+use std::io;
+use ycd_reader::YcdMultiFileStream;
 
-Explain what these tests test and why
+fn main() -> io::Result<()> {
+    let files = ["digits-0.ycd", "digits-1.ycd", "digits-2.ycd"];
+    let mut stream = YcdMultiFileStream::new(&files, 1_000)?;
 
+    while stream.has_next() {
+        let unit = stream.next()?;
+        consume(&unit.value);
+    }
+
+    Ok(())
+}
+
+fn consume(_digits: &str) {}
 ```
-Give an example
+
+## Header inspection
+
+`YcdFileUtil::get_ycd_header` returns recognized header fields, and
+`YcdFileUtil::get_header_size` returns the byte offset at which compressed
+blocks begin. Headers can use CRLF or LF line endings and are not restricted
+to a fixed buffer size.
+
+Only base-10 YCD files are supported. Missing or invalid required fields,
+invalid payload blocks, truncated files, and noncontiguous file lists are
+reported as `std::io::Error`.
+
+## Tests
+
+```text
+cargo test
 ```
 
-### And coding style tests
-
-Explain what these tests test and why
-
-```
-Give an example
-```
-
-## Deployment
-
-Add additional notes about how to deploy this on a live system
-
-## Built With
-
-* [Dropwizard](http://www.dropwizard.io/1.0.2/docs/) - The web framework used
-* [Maven](https://maven.apache.org/) - Dependency Management
-* [ROME](https://rometools.github.io/rome/) - Used to generate RSS Feeds
-
-## Contributing
-
-Please read [CONTRIBUTING.md](https://gist.github.com/PurpleBooth/b24679402957c63ec426) for details on our code of conduct, and the process for submitting pull requests to us.
-
-## Versioning
-
-We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/your/project/tags). 
-
-## Authors
-
-* **Billie Thompson** - *Initial work* - [PurpleBooth](https://github.com/PurpleBooth)
-
-See also the list of [contributors](https://github.com/your/project/contributors) who participated in this project.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
-
-## Acknowledgments
-
-* Hat tip to anyone whose code was used
-* Inspiration
-* etc
-
+The integration suite uses
+`tests/ycd/Pi - Dec - Chudnovsky_3000000.txt` as the golden result. It checks
+all three million digits with multiple processing-unit sizes, arbitrary
+ranges, both one-million- and two-million-digit YCD layouts, file-boundary
+crossings, final partial units, leading zeroes, and malformed inputs.
