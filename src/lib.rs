@@ -77,6 +77,102 @@ impl YcdSeqBlockStream {
         })
     }
 
+    /// Open a YCD file and begin sequential reading from an arbitrary 1-based digit position.
+    ///
+    /// `start_position` is the 1-based absolute digit index at which reading should start.
+    /// It must lie within the range covered by this file
+    /// (`digit_start .. digit_start + digit_length - 1`, inclusive).
+    ///
+    /// The `unit_size` and iteration interface are identical to [`Self::new`].
+    pub fn new_from<P: AsRef<Path>>(
+        file_name: P,
+        unit_size: i32,
+        start_position: i64,
+    ) -> io::Result<Self> {
+        let process_unit_size = validate_unit_size(unit_size)?;
+        let path = file_name.as_ref();
+        let metadata = parse_metadata(path)?;
+
+        // Validate start_position against the file's digit range.
+        let file_end = metadata
+            .digit_start
+            .checked_add(metadata.digit_length)
+            .and_then(|e| e.checked_sub(1))
+            .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        if start_position < metadata.digit_start || start_position > file_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Start position {start_position} is outside the file's range \
+                     [{}, {file_end}]",
+                    metadata.digit_start
+                ),
+            ));
+        }
+
+        // 0-based offset of start_position within this file's digit sequence.
+        let local_start = usize::try_from(
+            start_position
+                .checked_sub(metadata.digit_start)
+                .ok_or_else(|| invalid_data("local_start underflow"))?,
+        )
+        .map_err(|_| invalid_data("local_start overflows usize"))?;
+
+        let block_index = local_start / DIGITS_PER_BLOCK;
+        let offset_in_block = local_start % DIGITS_PER_BLOCK;
+
+        // Seek the file to the compressed block that contains start_position.
+        let seek_pos = metadata
+            .data_offset
+            .checked_add(
+                u64::try_from(block_index)
+                    .ok()
+                    .and_then(|bi| bi.checked_mul(8))
+                    .ok_or_else(|| invalid_data("Seek offset overflow"))?,
+            )
+            .ok_or_else(|| invalid_data("Seek offset overflow"))?;
+
+        let mut file_stream = BufReader::new(File::open(path)?);
+        file_stream.seek(io::SeekFrom::Start(seek_pos))?;
+
+        // Digits decoded from blocks entirely before the start block.
+        let mut decoded_digits = (block_index * DIGITS_PER_BLOCK) as i64;
+        let mut surplus_digit_str = String::new();
+
+        if offset_in_block > 0 {
+            // Read the first target block and retain only the digits at or after
+            // offset_in_block so the caller never sees digits before start_position.
+            let mut buffer = [0_u8; 8];
+            file_stream.read_exact(&mut buffer)?;
+            let number = u64::from_le_bytes(buffer);
+            let digits = format!("{number:019}");
+            if digits.len() != DIGITS_PER_BLOCK {
+                return Err(invalid_data(
+                    "A compressed block contains more than 19 decimal digits",
+                ));
+            }
+
+            let remaining = usize::try_from(metadata.digit_length - decoded_digits)
+                .map_err(|_| invalid_data("Invalid remaining digit count"))?;
+            let take = remaining.min(DIGITS_PER_BLOCK);
+            decoded_digits += take as i64;
+
+            surplus_digit_str.push_str(&digits[offset_in_block..take]);
+        }
+
+        Ok(Self {
+            process_unit_size,
+            file_stream,
+            digit_length: metadata.digit_length,
+            digit_start: metadata.digit_start,
+            decoded_digits,
+            next_process_no: 1,
+            next_start_digit: start_position,
+            current_process_unit: None,
+            surplus_digit_str,
+        })
+    }
+
     pub fn has_next(&self) -> bool {
         self.decoded_digits < self.digit_length || !self.surplus_digit_str.is_empty()
     }
@@ -187,6 +283,86 @@ impl YcdMultiFileStream {
             current_stream: 0,
             next_process_no: 1,
             next_start_digit,
+            current_process_unit: None,
+        })
+    }
+
+    /// Open a contiguous list of YCD files and begin sequential reading from
+    /// an arbitrary 1-based digit position.
+    ///
+    /// `start_position` is the 1-based absolute digit index at which reading
+    /// should start.  It must lie within the combined range of all files in
+    /// the list.  All files in `file_names` are validated for header
+    /// correctness and list continuity before any payload I/O begins.
+    ///
+    /// Files that end before `start_position` are skipped entirely; only the
+    /// file that contains `start_position` (and all subsequent files) are
+    /// opened for streaming.
+    ///
+    /// The `unit_size` and iteration interface are identical to [`Self::new`].
+    pub fn new_from<P: AsRef<Path>>(
+        file_names: &[P],
+        unit_size: i32,
+        start_position: i64,
+    ) -> io::Result<Self> {
+        let process_unit_size = validate_unit_size(unit_size)?;
+        if file_names.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "At least one YCD file is required",
+            ));
+        }
+        if start_position < 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Start position must be >= 1",
+            ));
+        }
+
+        // Validate every file (headers + contiguity) before any streaming I/O.
+        let file_infos = collect_file_infos(file_names)?;
+
+        // Validate start_position against the overall range.
+        let list_start = file_infos[0].file_start as i64;
+        let last = file_infos.last().expect("non-empty after collect_file_infos");
+        let list_end = last
+            .file_start
+            .checked_add(last.file_length)
+            .and_then(|e| e.checked_sub(1))
+            .ok_or_else(|| invalid_data("Digit range end overflow"))? as i64;
+
+        if start_position < list_start || start_position > list_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Start position {start_position} is outside the available range \
+                     [{list_start}, {list_end}]"
+                ),
+            ));
+        }
+
+        // Find the first file that contains start_position (its last digit >=
+        // start_position).
+        let start_file_idx = file_infos.partition_point(|fi| {
+            fi.file_start + fi.file_length - 1 < start_position as usize
+        });
+
+        // Build streams only for files at or after start_file_idx.
+        let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
+        for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
+            if i == 0 {
+                streams.push(YcdSeqBlockStream::new_from(file_name, unit_size, start_position)?);
+            } else {
+                streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
+            }
+        }
+
+        Ok(Self {
+            process_unit_size,
+            streams,
+            current_stream: 0,
+            next_process_no: 1,
+            next_start_digit: start_position,
             current_process_unit: None,
         })
     }

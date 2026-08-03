@@ -110,6 +110,40 @@ fn main() -> io::Result<()> {
 The processing-unit size must be at least 19. The final unit can be shorter
 than the requested size.
 
+### Resuming single-file reading from an arbitrary position
+
+`YcdSeqBlockStream::new_from` opens a YCD file and positions the stream so that
+the first digit returned is at a caller-specified 1-based absolute position.
+This lets an application save `unit.start_digit` at any point and later resume
+reading from exactly that position.
+
+```rust
+use std::io;
+use ycd_reader::YcdSeqBlockStream;
+
+fn main() -> io::Result<()> {
+    // Resume from position 500_000 (1-based, relative to all digits of Pi).
+    let mut stream = YcdSeqBlockStream::new_from("digits-0.ycd", 1_000, 500_000)?;
+
+    while stream.has_next() {
+        let unit = stream.next()?;
+        println!(
+            "unit {} starts at digit {} and contains {} digits",
+            unit.process_no,
+            unit.start_digit,
+            unit.value.len()
+        );
+    }
+
+    Ok(())
+}
+```
+
+`start_position` must be inside the digit range covered by the file
+(`digit_start .. digit_start + digit_length - 1`, inclusive). The stream seeks
+directly to the compressed block that contains `start_position`; no bytes
+before that block are read.
+
 ## Reading contiguous files (sequential)
 
 `YcdMultiFileStream` joins an explicit ordered list of YCD files. It validates
@@ -123,6 +157,36 @@ use ycd_reader::YcdMultiFileStream;
 fn main() -> io::Result<()> {
     let files = ["digits-0.ycd", "digits-1.ycd", "digits-2.ycd"];
     let mut stream = YcdMultiFileStream::new(&files, 1_000)?;
+
+    while stream.has_next() {
+        let unit = stream.next()?;
+        consume(&unit.value);
+    }
+
+    Ok(())
+}
+
+fn consume(_digits: &str) {}
+```
+
+### Resuming multi-file reading from an arbitrary position
+
+`YcdMultiFileStream::new_from` opens an ordered list of contiguous YCD files
+and positions the stream at a caller-specified 1-based absolute digit position.
+All files in the list are validated for header correctness and list continuity
+before any payload I/O begins. Files that end before `start_position` are
+skipped; only the file that contains `start_position` and the files that follow
+it are opened for streaming.
+
+```rust
+use std::io;
+use ycd_reader::YcdMultiFileStream;
+
+fn main() -> io::Result<()> {
+    let files = ["digits-0.ycd", "digits-1.ycd", "digits-2.ycd"];
+
+    // Resume from position 1_500_000 (inside the second file).
+    let mut stream = YcdMultiFileStream::new_from(&files, 1_000, 1_500_000)?;
 
     while stream.has_next() {
         let unit = stream.next()?;
@@ -163,3 +227,7 @@ The integration suite uses
   `blocks_to_read` without running full I/O.
 - Sequential streaming: all three million digits with multiple processing-unit
   sizes, file-boundary crossings, final partial units, and malformed inputs.
+- `new_from` (sequential stream with start position): position-1 equivalence
+  with `new`, mid-block seeks, block-boundary seeks, last-digit reads,
+  non-zero BlockID files, multi-file boundary and mid-file starts, unit
+  crossing file boundaries, and the complete error-contract table.
