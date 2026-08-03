@@ -1033,3 +1033,342 @@ fn seek_params_unit_tests() {
     let (bi1, oib1, btr1) = compute_seek_params(0, 14);
     assert_eq!((bi1, oib1, btr1), (0, 0, 1));
 }
+
+// ============================================================================
+// Tests for YcdSeqBlockStream::new_from (sequential stream with start position)
+// ============================================================================
+
+/// Helper: collect all digits from a YcdSeqBlockStream started at start_position,
+/// validating process_no and start_digit fields.
+fn collect_single_from(
+    path: impl AsRef<Path>,
+    unit_size: i32,
+    start_position: i64,
+) -> io::Result<String> {
+    let mut result = String::new();
+    let mut stream = YcdSeqBlockStream::new_from(path, unit_size, start_position)?;
+    let mut expected_start = start_position;
+    let mut expected_process_no: i64 = 1;
+
+    while stream.has_next() {
+        let unit = stream.next()?.clone();
+        assert_eq!(unit.process_no, expected_process_no);
+        assert_eq!(unit.start_digit, expected_start);
+        expected_process_no += 1;
+        expected_start += unit.value.len() as i64;
+        result.push_str(&unit.value);
+    }
+    assert_eq!(
+        stream.next().unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    Ok(result)
+}
+
+#[test]
+fn seq_new_from_position_1_matches_new() {
+    // new_from at the file's first digit should produce the same output as new.
+    let path = one_million_path(0);
+    let from_new = collect_single(&path, 1000).unwrap();
+    let from_new_from = collect_single_from(&path, 1000, 1).unwrap();
+    assert_eq!(from_new, from_new_from);
+}
+
+#[test]
+fn seq_new_from_mid_file_matches_golden_suffix() {
+    // Start at an arbitrary position mid-file and verify the digits match the golden file.
+    let golden = golden_digits();
+    let start: i64 = 500_000;
+    let path = one_million_path(0);
+    let result = collect_single_from(&path, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..1_000_000];
+    assert_eq!(result, expected, "digits from position {start} should match golden");
+}
+
+#[test]
+fn seq_new_from_block_boundary_position() {
+    // Position exactly at a block boundary (multiple of 19, converted to 1-based).
+    let golden = golden_digits();
+    // 19 * 10 = 190, so position 191 is the start of block 10 (0-based: local_start = 190).
+    let start: i64 = 191;
+    let path = one_million_path(0);
+    let result = collect_single_from(&path, 19, start).unwrap();
+    let expected = &golden[(start as usize - 1)..1_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn seq_new_from_mid_block_position() {
+    // Position inside a block (offset_in_block > 0).
+    let golden = golden_digits();
+    // local_start = 99 → block_index=5, offset_in_block=4
+    let start: i64 = 100; // 1-based, local_start = 99
+    let path = one_million_path(0);
+    let result = collect_single_from(&path, 100, start).unwrap();
+    let expected = &golden[(start as usize - 1)..1_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn seq_new_from_last_digit() {
+    // Start at the very last digit of a file — should return exactly 1 digit.
+    let golden = golden_digits();
+    let start: i64 = 1_000_000;
+    let path = one_million_path(0);
+    let result = collect_single_from(&path, 19, start).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result, &golden[999_999..1_000_000]);
+}
+
+#[test]
+fn seq_new_from_non_zero_blockid_file() {
+    // File with BlockID=1 (digit_start=1_000_001). new_from with that start position.
+    let golden = golden_digits();
+    let path = one_million_path(1);
+    // digit_start = 1_000_001, digit_end = 2_000_000
+    let start: i64 = 1_500_000;
+    let result = collect_single_from(&path, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..2_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn seq_new_from_generated_file_mid_block() {
+    // Verify the skipped leading digits are correct using a small synthetic file.
+    let digits = "12345678901234567890123456789012345678"; // 38 digits, 2 blocks
+    let f = TempYcd::valid(digits, 38, 0, "\n", "").unwrap();
+
+    // Start at position 5 (local_start=4, block_index=0, offset_in_block=4)
+    let result = collect_single_from(&f.path, 19, 5).unwrap();
+    assert_eq!(result, &digits[4..]);
+
+    // Start at position 20 (local_start=19, block_index=1, offset_in_block=0)
+    let result = collect_single_from(&f.path, 19, 20).unwrap();
+    assert_eq!(result, &digits[19..]);
+
+    // Start at position 25 (local_start=24, block_index=1, offset_in_block=5)
+    let result = collect_single_from(&f.path, 19, 25).unwrap();
+    assert_eq!(result, &digits[24..]);
+}
+
+#[test]
+fn seq_new_from_errors() {
+    let path = one_million_path(0); // digit_start=1, digit_length=1_000_000
+
+    // start_position = 0 (before file range)
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 19, 0)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // start_position beyond last digit
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 19, 1_000_001)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // invalid unit_size
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 1, 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // second file with BlockID=1 — start_position in the first file's range
+    let path2 = one_million_path(1); // digit_start=1_000_001
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path2, 19, 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+// ============================================================================
+// Tests for YcdMultiFileStream::new_from (multi-file stream with start position)
+// ============================================================================
+
+/// Helper: collect digits from a YcdMultiFileStream started at start_position.
+fn collect_multi_from<P: AsRef<Path>>(
+    paths: &[P],
+    unit_size: i32,
+    start_position: i64,
+) -> io::Result<String> {
+    let mut result = String::new();
+    let mut stream = YcdMultiFileStream::new_from(paths, unit_size, start_position)?;
+    let mut expected_start = start_position;
+    let mut expected_process_no: i64 = 1;
+
+    while stream.has_next() {
+        let unit = stream.next()?.clone();
+        assert_eq!(unit.process_no, expected_process_no);
+        assert_eq!(unit.start_digit, expected_start);
+        expected_process_no += 1;
+        expected_start += unit.value.len() as i64;
+        result.push_str(&unit.value);
+    }
+    assert_eq!(
+        stream.next().unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    Ok(result)
+}
+
+#[test]
+fn multi_new_from_position_1_matches_new() {
+    // new_from at position 1 should match new for a multi-file list.
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let from_new = collect_multi(&paths, 1000).unwrap();
+    let from_new_from = collect_multi_from(&paths, 1000, 1).unwrap();
+    assert_eq!(from_new, from_new_from);
+}
+
+#[test]
+fn multi_new_from_mid_first_file() {
+    // Start mid-first-file and verify output matches golden from that position.
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 500_123;
+    let result = collect_multi_from(&paths, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..3_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn multi_new_from_at_file_boundary() {
+    // Start exactly at the first digit of the second file.
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 1_000_001; // digit_start of file #1
+    let result = collect_multi_from(&paths, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..3_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn multi_new_from_mid_second_file() {
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 1_500_000;
+    let result = collect_multi_from(&paths, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..3_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn multi_new_from_last_file_start() {
+    // Start at the beginning of the last file.
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 2_000_001;
+    let result = collect_multi_from(&paths, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..3_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn multi_new_from_last_digit() {
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 3_000_000;
+    let result = collect_multi_from(&paths, 19, start).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result, &golden[2_999_999..3_000_000]);
+}
+
+#[test]
+fn multi_new_from_crossing_file_boundary() {
+    // Unit size = 1000, start near the end of file 0 so the first unit crosses
+    // into file 1.
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let start: i64 = 999_700; // 300 digits left in file 0, then crosses into file 1
+    let result = collect_multi_from(&paths, 1000, start).unwrap();
+    let expected = &golden[(start as usize - 1)..3_000_000];
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn multi_new_from_generated_files() {
+    // Synthetic three-file list, start in the middle of the second file.
+    let f0 = TempYcd::valid("1234567890123456789", 19, 0, "\n", "").unwrap();
+    let f1 = TempYcd::valid("2345678901234567890", 19, 1, "\n", "").unwrap();
+    let f2 = TempYcd::valid("3456789012345678901", 19, 2, "\n", "").unwrap();
+    let all = "123456789012345678923456789012345678903456789012345678901";
+
+    // Start at position 10 (mid f0)
+    let result =
+        collect_multi_from(&[&f0.path, &f1.path, &f2.path], 19, 10).unwrap();
+    assert_eq!(result, &all[9..]);
+
+    // Start at position 20 (start of f1)
+    let result =
+        collect_multi_from(&[&f0.path, &f1.path, &f2.path], 19, 20).unwrap();
+    assert_eq!(result, &all[19..]);
+
+    // Start at position 30 (mid f1)
+    let result =
+        collect_multi_from(&[&f0.path, &f1.path, &f2.path], 19, 30).unwrap();
+    assert_eq!(result, &all[29..]);
+}
+
+#[test]
+fn multi_new_from_errors() {
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let empty: [&str; 0] = [];
+
+    // Empty list
+    assert_eq!(
+        YcdMultiFileStream::new_from(&empty, 19, 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // start_position = 0
+    assert_eq!(
+        YcdMultiFileStream::new_from(&paths, 19, 0)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // start_position before list range
+    assert_eq!(
+        YcdMultiFileStream::new_from(&paths, 19, -1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // start_position beyond list end
+    assert_eq!(
+        YcdMultiFileStream::new_from(&paths, 19, 3_000_001)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // invalid unit_size
+    assert_eq!(
+        YcdMultiFileStream::new_from(&paths, 1, 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // Non-contiguous files should still be rejected
+    let f0 = TempYcd::valid("1234567890123456789", 19, 0, "\n", "").unwrap();
+    let f2 = TempYcd::valid("1234567890123456789", 19, 2, "\n", "").unwrap();
+    assert_eq!(
+        YcdMultiFileStream::new_from(&[&f0.path, &f2.path], 19, 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
