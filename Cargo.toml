@@ -1,0 +1,8 @@
+[package]
+name = "ycd_reader"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+strum = "0.24.1"
+strum_macros = "0.24.1"
