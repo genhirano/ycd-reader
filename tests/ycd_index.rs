@@ -60,7 +60,29 @@ fn build_stores_correct_metadata() {
     assert_eq!(entries[1].file_length, 1_000_000);
 }
 
-// ─── rebuild tests ───────────────────────────────────────────────────────────
+#[test]
+fn build_stores_absolute_path_when_given_relative() {
+    // Create a temporary YCD file to use as a test fixture.
+    let file = TempYcd::valid("1415926535897932384", 19, 0, "\n", "").unwrap();
+
+    // Construct a relative path from the current working directory.
+    let abs_path = file.path.canonicalize().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let rel_path = abs_path
+        .strip_prefix(&cwd)
+        .unwrap_or(abs_path.as_path())
+        .to_path_buf();
+
+    // Use the relative path to build the index.
+    let idx = YcdIndex::build(&[&rel_path]).unwrap();
+
+    // The stored path must be absolute regardless of how it was supplied.
+    assert!(
+        idx.entries()[0].path.is_absolute(),
+        "expected an absolute path, got: {}",
+        idx.entries()[0].path.display()
+    );
+}
 
 #[test]
 fn rebuild_replaces_index() {
@@ -273,18 +295,31 @@ fn stale_index_mtime_change_detected() {
 // ─── Binary-search: unopened-file verification ───────────────────────────────
 //
 // This test verifies that read_digits only validates/opens the file(s) it
-// actually needs.  We build an index whose second entry deliberately has a
-// stale size snapshot.  If the first file alone satisfies the request, the
-// second file's stale entry must never be checked, so the call must succeed.
+// actually needs.  We build an index from two temporary copies of the fixture
+// files, then append a byte to the second copy so that its on-disk size differs
+// from the snapshot.  A read confined entirely to the first file must succeed
+// (the stale second file is never touched); a read that spans into the second
+// file must fail with a stale-index error.
 
 #[test]
 fn index_does_not_open_unneeded_files() {
-    let files = [one_million_path(0), one_million_path(1)];
-    let mut idx = YcdIndex::build(&files).unwrap();
+    // Make writable temporary copies so we can modify them without touching the
+    // shared fixture files.
+    let src0 = std::fs::read(one_million_path(0)).unwrap();
+    let src1 = std::fs::read(one_million_path(1)).unwrap();
+    let tmp0 = TempYcd::from_bytes(&src0).unwrap();
+    let tmp1 = TempYcd::from_bytes(&src1).unwrap();
+    let files = [&tmp0.path, &tmp1.path];
 
-    // Corrupt the size snapshot of the second entry so that if it were checked
-    // the call would return a stale-index error.
-    idx.entries_mut()[1].file_size = 0;
+    // Build the index before modifying either file.
+    let idx = YcdIndex::build(&files).unwrap();
+
+    // Corrupt the second file on disk by appending a byte so that its size
+    // differs from the snapshot. A read touching only the first file must
+    // succeed; the stale second file is never opened.
+    let mut contents1 = std::fs::read(&tmp1.path).unwrap();
+    contents1.push(0xff);
+    std::fs::write(&tmp1.path, &contents1).unwrap();
 
     // A read confined entirely to the first file must succeed.
     let result = idx.read_digits(1, 100);

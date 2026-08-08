@@ -516,7 +516,7 @@ impl YcdIndex {
             let modified = fs_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
             entries.push(YcdIndexEntry {
-                path: path.as_ref().to_path_buf(),
+                path: std::fs::canonicalize(path.as_ref())?,
                 data_offset: fi.data_offset,
                 file_start: fi.file_start,
                 file_length: fi.file_length,
@@ -550,14 +550,6 @@ impl YcdIndex {
     /// Returns a slice of all index entries in digit order.
     pub fn entries(&self) -> &[YcdIndexEntry] {
         &self.entries
-    }
-
-    /// Returns a mutable slice of all index entries in digit order.
-    ///
-    /// Primarily useful in tests that need to corrupt a snapshot field to
-    /// verify stale-index detection.
-    pub fn entries_mut(&mut self) -> &mut [YcdIndexEntry] {
-        &mut self.entries
     }
 
     /// Read exactly `length` decimal digits starting at 1-based position
