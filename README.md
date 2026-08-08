@@ -7,6 +7,16 @@ Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
 little-endian block. The library restores those blocks to digit strings and
 returns them in caller-selected processing units.
 
+## Quick start
+
+This repository includes real YCD fixtures under `tests/ycd`, and the examples
+below use those files so they can be run as written from the repository root.
+In application code, replace those paths with your own YCD files.
+
+Only base-10 YCD files are supported. Positions are always 1-based and refer
+only to decimal digits after the decimal point. The integer part, sign, and
+decimal point are never returned.
+
 ## Random-access: read a specific digit range
 
 `YcdFileUtil::read_digits` reads exactly `length` digits starting at a
@@ -21,13 +31,11 @@ use ycd_reader::YcdFileUtil;
 
 fn main() -> io::Result<()> {
     let files = [
-        "Pi - Dec - Chudnovsky - 0.ycd",
-        "Pi - Dec - Chudnovsky - 1.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 0.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 1.ycd",
     ];
 
-    // Read 20 digits starting at position 999,995 (1-based, decimal digits only).
-    // Position 1 is the first digit after the decimal point — "1" in "3.14159…"
-    // The integer part, sign, and decimal point are never included.
+    // Read 20 digits starting at position 999,995.
     let digits = YcdFileUtil::read_digits(&files, 999_995, 20)?;
     assert_eq!(digits, "45815130927562832084");
 
@@ -49,9 +57,7 @@ pub fn read_digits<P: AsRef<Path>>(
   to have `BlockID = 0`; positions are derived from each file's header.
   The files must be contiguous: each file must start immediately after the
   preceding file ends. All files are validated before any I/O on the payload.
-- `one_based_start_position` — 1-based index of the first digit to return.
-  Position 1 is the first decimal digit (immediately after the "3." in Pi).
-  The integer part, sign, and decimal point are never returned.
+- `one_based_start_position` — 1-based index of the first digit to return. Position 1 is the first decimal digit (immediately after the "3." in Pi).
 - `length` — Number of digits to return. The result string is exactly
   `length` ASCII bytes.
 
@@ -91,7 +97,10 @@ use std::io;
 use ycd_reader::YcdSeqBlockStream;
 
 fn main() -> io::Result<()> {
-    let mut stream = YcdSeqBlockStream::new("digits-0.ycd", 1_000)?;
+    let mut stream = YcdSeqBlockStream::new(
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 0.ycd",
+        1_000,
+    )?;
 
     while stream.has_next() {
         let unit = stream.next()?;
@@ -108,7 +117,8 @@ fn main() -> io::Result<()> {
 ```
 
 The processing-unit size must be at least 19. The final unit can be shorter
-than the requested size.
+than the requested size. `next()` returns `UnexpectedEof` after the stream is
+exhausted, so callers should guard reads with `has_next()`.
 
 ### Resuming single-file reading from an arbitrary position
 
@@ -123,7 +133,11 @@ use ycd_reader::YcdSeqBlockStream;
 
 fn main() -> io::Result<()> {
     // Resume from position 500_000 (1-based, relative to all digits of Pi).
-    let mut stream = YcdSeqBlockStream::new_from("digits-0.ycd", 1_000, 500_000)?;
+    let mut stream = YcdSeqBlockStream::new_from(
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 0.ycd",
+        1_000,
+        500_000,
+    )?;
 
     while stream.has_next() {
         let unit = stream.next()?;
@@ -142,7 +156,8 @@ fn main() -> io::Result<()> {
 `start_position` must be inside the digit range covered by the file
 (`digit_start .. digit_start + digit_length - 1`, inclusive). The stream seeks
 directly to the compressed block that contains `start_position`; no bytes
-before that block are read.
+before that block are read. As with `new`, callers should stop when
+`has_next()` becomes false rather than calling `next()` unconditionally.
 
 ## Reading contiguous files (sequential)
 
@@ -155,7 +170,11 @@ use std::io;
 use ycd_reader::YcdMultiFileStream;
 
 fn main() -> io::Result<()> {
-    let files = ["digits-0.ycd", "digits-1.ycd", "digits-2.ycd"];
+    let files = [
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 0.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 1.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 2.ycd",
+    ];
     let mut stream = YcdMultiFileStream::new(&files, 1_000)?;
 
     while stream.has_next() {
@@ -168,6 +187,10 @@ fn main() -> io::Result<()> {
 
 fn consume(_digits: &str) {}
 ```
+
+`YcdMultiFileStream::next()` also returns `UnexpectedEof` after the stream is
+exhausted, so the intended usage is the same `has_next()`-guarded loop shown
+above.
 
 ### Resuming multi-file reading from an arbitrary position
 
@@ -183,7 +206,11 @@ use std::io;
 use ycd_reader::YcdMultiFileStream;
 
 fn main() -> io::Result<()> {
-    let files = ["digits-0.ycd", "digits-1.ycd", "digits-2.ycd"];
+    let files = [
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 0.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 1.ycd",
+        "tests/ycd/1000000/Pi - Dec - Chudnovsky - 2.ycd",
+    ];
 
     // Resume from position 1_500_000 (inside the second file).
     let mut stream = YcdMultiFileStream::new_from(&files, 1_000, 1_500_000)?;
@@ -206,9 +233,10 @@ fn consume(_digits: &str) {}
 blocks begin. Headers can use CRLF or LF line endings and are not restricted
 to a fixed buffer size.
 
-Only base-10 YCD files are supported. Missing or invalid required fields,
-invalid payload blocks, truncated files, and noncontiguous file lists are
-reported as `std::io::Error`.
+These APIs operate on a single file. Missing or invalid required fields,
+non-base-10 headers, invalid payload blocks, and truncated files are reported
+as `std::io::Error`. Contiguity validation for a list of files belongs to
+`YcdFileUtil::read_digits` and `YcdMultiFileStream`.
 
 ## Tests
 
@@ -217,17 +245,6 @@ cargo test
 ```
 
 The integration suite uses
-`tests/ycd/Pi - Dec - Chudnovsky_3000000.txt` as the golden result. It covers:
-
-- `read_digits`: position 1 with various lengths, arbitrary middle positions,
-  19-digit block boundaries (before/after/crossing), YCD file boundaries
-  (before/after/crossing) in both 1M×3 and 2M+1M layouts, leading zeroes,
-  reads spanning multiple files, the complete error-contract table, and
-  direct-seek unit tests that verify `block_index`, `offset_in_block`, and
-  `blocks_to_read` without running full I/O.
-- Sequential streaming: all three million digits with multiple processing-unit
-  sizes, file-boundary crossings, final partial units, and malformed inputs.
-- `new_from` (sequential stream with start position): position-1 equivalence
-  with `new`, mid-block seeks, block-boundary seeks, last-digit reads,
-  non-zero BlockID files, multi-file boundary and mid-file starts, unit
-  crossing file boundaries, and the complete error-contract table.
+`tests/ycd/Pi - Dec - Chudnovsky_3000000.txt` as the golden result and checks
+random-access reads, sequential streaming, resume-from-position behavior,
+block and file boundary handling, and the documented error contract.
