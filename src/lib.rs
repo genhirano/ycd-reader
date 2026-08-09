@@ -94,7 +94,6 @@ impl YcdSeqBlockStream {
         let path = file_name.as_ref();
         let metadata = parse_metadata(path)?;
 
-        // Validate start_position against the file's digit range.
         let file_end = metadata
             .digit_start
             .checked_add(metadata.digit_length)
@@ -111,7 +110,6 @@ impl YcdSeqBlockStream {
             ));
         }
 
-        // 0-based offset of start_position within this file's digit sequence.
         let local_start = usize::try_from(
             start_position
                 .checked_sub(metadata.digit_start)
@@ -122,7 +120,6 @@ impl YcdSeqBlockStream {
         let block_index = local_start / DIGITS_PER_BLOCK;
         let offset_in_block = local_start % DIGITS_PER_BLOCK;
 
-        // Seek the file to the compressed block that contains start_position.
         let seek_pos = metadata
             .data_offset
             .checked_add(
@@ -136,13 +133,10 @@ impl YcdSeqBlockStream {
         let mut file_stream = BufReader::new(File::open(path)?);
         file_stream.seek(io::SeekFrom::Start(seek_pos))?;
 
-        // Digits decoded from blocks entirely before the start block.
         let mut decoded_digits = (block_index * DIGITS_PER_BLOCK) as i64;
         let mut surplus_digit_str = String::new();
 
         if offset_in_block > 0 {
-            // Read the first target block and retain only the digits at or after
-            // offset_in_block so the caller never sees digits before start_position.
             let mut buffer = [0_u8; 8];
             file_stream.read_exact(&mut buffer)?;
             let number = u64::from_le_bytes(buffer);
@@ -320,10 +314,8 @@ impl YcdMultiFileStream {
             ));
         }
 
-        // Validate every file (headers + contiguity) before any streaming I/O.
         let file_infos = collect_file_infos(file_names)?;
 
-        // Validate start_position against the overall range.
         let list_start = file_infos[0].file_start as i64;
         let last = file_infos
             .last()
@@ -344,12 +336,9 @@ impl YcdMultiFileStream {
             ));
         }
 
-        // Find the first file that contains start_position (its last digit >=
-        // start_position).
         let start_file_idx = file_infos
             .partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position as usize);
 
-        // Build streams only for files at or after start_file_idx.
         let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
         for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
             if i == 0 {
@@ -414,8 +403,6 @@ impl YcdMultiFileStream {
             .expect("unit was assigned"))
     }
 }
-
-// ─── YcdIndex ────────────────────────────────────────────────────────────────
 
 /// One entry in a [`YcdIndex`], representing a single YCD file.
 ///
@@ -635,7 +622,6 @@ impl YcdIndex {
         let mut result = String::new();
         result.try_reserve_exact(length).map_err(io::Error::other)?;
 
-        // Binary search: find the first entry whose last digit >= start position.
         let start_idx = self
             .entries
             .partition_point(|e| e.file_start + e.file_length - 1 < one_based_start_position);
@@ -647,7 +633,6 @@ impl YcdIndex {
                 break;
             }
 
-            // Validate the file against the index snapshot before opening it.
             let fs_meta = std::fs::metadata(&entry.path)?;
             if fs_meta.len() != entry.file_size {
                 return Err(invalid_data(format!(
@@ -736,8 +721,6 @@ impl YcdIndex {
         Ok(result)
     }
 }
-
-// ─── FileInfo (internal) ──────────────────────────────────────────────────────
 
 /// Per-file metadata used by [`YcdFileUtil::read_digits`].
 struct FileInfo {
