@@ -337,3 +337,10 @@ The integration suite uses
 The published crates.io package excludes the large `tests/ycd/**` fixture data
 to stay within the upload size limit. Run the full integration suite from a Git
 checkout of this repository.
+
+## License
+
+Licensed under either of the following, at your option:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
