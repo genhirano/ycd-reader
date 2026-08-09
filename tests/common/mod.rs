@@ -21,7 +21,7 @@ impl TempYcd {
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("ycd_reader_{}_{}.ycd", std::process::id(), id));
+            std::env::temp_dir().join(format!("ycd-reader_{}_{}.ycd", std::process::id(), id));
         fs::write(&path, bytes)?;
         Ok(Self { path })
     }

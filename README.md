@@ -1,6 +1,6 @@
-# ycd_reader
+# ycd-reader
 
-`ycd_reader` is a Rust library for reading base-10 compressed digit files
+`ycd-reader` is a Rust library for reading base-10 compressed digit files
 (`.ycd`) produced by y-cruncher.
 
 Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
