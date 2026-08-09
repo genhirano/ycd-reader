@@ -19,7 +19,7 @@ of YCD files and want to avoid scanning every header on each request.
 
 ### Lifecycle
 
-```
+``` text
 Build once         Fast reads           Refresh when files change
 ─────────────      ──────────────────   ───────────────────────────
 YcdIndex::build    index.read_digits    index.rebuild
@@ -100,7 +100,7 @@ index.
 ### `YcdIndex::read_digits` errors
 
 | Condition | `io::ErrorKind` |
-|---|---|
+| --- | --- |
 | Index is empty, position 0, or length 0 | `InvalidInput` |
 | Start or end position outside indexed range | `InvalidInput` |
 | `start + length` overflows `usize` | `InvalidData` |
@@ -160,7 +160,7 @@ pub fn read_digits<P: AsRef<Path>>(
 ### File-range rules
 
 | Header field | Logical length of the file |
-|---|---|
+| --- | --- |
 | `TotalDigits > 0` | `min(Blocksize, TotalDigits − Blocksize × BlockID)` |
 | `TotalDigits == 0` | `Blocksize` |
 
@@ -171,7 +171,7 @@ digits. If the actual payload is shorter than the logical range,
 ### Errors
 
 | Condition | `io::ErrorKind` |
-|---|---|
+| --- | --- |
 | Empty file list, position 0, or length 0 | `InvalidInput` |
 | Start position out of range, or end exceeds range | `InvalidInput` |
 | Gap, duplicate, or reversed files in list | `InvalidInput` |
