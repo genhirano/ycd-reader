@@ -1,7 +1,16 @@
 [package]
 name = "ycd_reader"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
+description = "A Rust library for random-access and sequential reading of y-cruncher YCD digit files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/genhirano/ycd_reader"
+documentation = "https://docs.rs/ycd_reader"
+readme = "README.md"
+keywords = ["ycd", "y-cruncher", "pi", "digits", "parser"]
+categories = ["parser-implementations", "science"]
+exclude = ["tests/ycd/**"]
 
 [dependencies]
 strum = "0.28"

@@ -333,3 +333,7 @@ The integration suite uses
   with `new`, mid-block seeks, block-boundary seeks, last-digit reads,
   non-zero BlockID files, multi-file boundary and mid-file starts, unit
   crossing file boundaries, and the complete error-contract table.
+
+The published crates.io package excludes the large `tests/ycd/**` fixture data
+to stay within the upload size limit. Run the full integration suite from a Git
+checkout of this repository.
