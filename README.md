@@ -7,6 +7,108 @@ Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
 little-endian block. The library restores those blocks to digit strings and
 returns them in caller-selected processing units.
 
+## In-memory index: `YcdIndex`
+
+`YcdIndex` builds an in-memory index over a contiguous set of YCD files by
+reading every file's header once.  Subsequent `read_digits` calls use binary
+search to locate the relevant file(s) and seek directly to the target block,
+leaving all other files untouched.
+
+This is the recommended path when you have a large, mostly-static collection
+of YCD files and want to avoid scanning every header on each request.
+
+### Lifecycle
+
+```
+Build once         Fast reads           Refresh when files change
+─────────────      ──────────────────   ───────────────────────────
+YcdIndex::build    index.read_digits    index.rebuild
+```
+
+### Building the index
+
+```rust
+use std::io;
+use ycd_reader::YcdIndex;
+
+fn main() -> io::Result<()> {
+    let files = [
+        "Pi - Dec - Chudnovsky - 0.ycd",
+        "Pi - Dec - Chudnovsky - 1.ycd",
+    ];
+
+    // Build the index once: reads all headers and validates continuity.
+    let index = YcdIndex::build(&files)?;
+    println!("{} files indexed", index.len());
+
+    Ok(())
+}
+```
+
+### Reading digits via the index
+
+```rust
+use std::io;
+use ycd_reader::YcdIndex;
+
+fn main() -> io::Result<()> {
+    let files = [
+        "Pi - Dec - Chudnovsky - 0.ycd",
+        "Pi - Dec - Chudnovsky - 1.ycd",
+    ];
+
+    let index = YcdIndex::build(&files)?;
+
+    // Fast random-access — only the file(s) containing the requested range
+    // are opened.  All other files are skipped entirely.
+    let digits = index.read_digits(999_995, 20)?;
+    assert_eq!(digits, "45815130927562832084");
+
+    Ok(())
+}
+```
+
+### Updating the index
+
+When the file set changes (files added, removed, or replaced), call
+`rebuild` to discard the old index and build a fresh one.  If the rebuild
+fails the old index is left intact.
+
+```rust
+# use std::io;
+# use ycd_reader::YcdIndex;
+# fn main() -> io::Result<()> {
+# let files: &[&str] = &[];
+let mut index = YcdIndex::build(files)?;
+
+// Later, after files change:
+let new_files = ["Pi - Dec - Chudnovsky - 0.ycd", "Pi - Dec - Chudnovsky - 1.ycd"];
+index.rebuild(&new_files)?;
+# Ok(())
+# }
+```
+
+### Stale-index detection
+
+Each time a file is actually read, its current `file_size` and
+last-modified time are compared against the snapshot recorded at build time.
+A mismatch causes `read_digits` to return `io::ErrorKind::InvalidData` with
+an explicit **"index is stale"** message.  There is no silent fallback to a
+full-scan path — the caller must explicitly call `rebuild` to refresh the
+index.
+
+### `YcdIndex::read_digits` errors
+
+| Condition | `io::ErrorKind` |
+|---|---|
+| Index is empty, position 0, or length 0 | `InvalidInput` |
+| Start or end position outside indexed range | `InvalidInput` |
+| `start + length` overflows `usize` | `InvalidData` |
+| File size or mtime differs from index snapshot | `InvalidData` |
+| File does not exist | `NotFound` |
+| Payload truncated within logical range | `UnexpectedEof` |
+| Output string pre-allocation failure | `Other` |
+
 ## Random-access: read a specific digit range
 
 `YcdFileUtil::read_digits` reads exactly `length` digits starting at a

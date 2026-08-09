@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 strum = "0.28"
 strum_macros = "0.28"
+
+[dev-dependencies]
+filetime = "0.2"

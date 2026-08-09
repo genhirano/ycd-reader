@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use strum_macros::{AsRefStr, EnumString};
 
@@ -324,7 +325,9 @@ impl YcdMultiFileStream {
 
         // Validate start_position against the overall range.
         let list_start = file_infos[0].file_start as i64;
-        let last = file_infos.last().expect("non-empty after collect_file_infos");
+        let last = file_infos
+            .last()
+            .expect("non-empty after collect_file_infos");
         let list_end = last
             .file_start
             .checked_add(last.file_length)
@@ -343,15 +346,18 @@ impl YcdMultiFileStream {
 
         // Find the first file that contains start_position (its last digit >=
         // start_position).
-        let start_file_idx = file_infos.partition_point(|fi| {
-            fi.file_start + fi.file_length - 1 < start_position as usize
-        });
+        let start_file_idx = file_infos
+            .partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position as usize);
 
         // Build streams only for files at or after start_file_idx.
         let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
         for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
             if i == 0 {
-                streams.push(YcdSeqBlockStream::new_from(file_name, unit_size, start_position)?);
+                streams.push(YcdSeqBlockStream::new_from(
+                    file_name,
+                    unit_size,
+                    start_position,
+                )?);
             } else {
                 streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
             }
@@ -408,6 +414,330 @@ impl YcdMultiFileStream {
             .expect("unit was assigned"))
     }
 }
+
+// ─── YcdIndex ────────────────────────────────────────────────────────────────
+
+/// One entry in a [`YcdIndex`], representing a single YCD file.
+///
+/// The snapshot fields (`file_size`, `modified`) are recorded at index-build
+/// time and compared against the filesystem when a file is actually read.
+/// Any mismatch causes `read_digits` to return an explicit "stale index" error
+/// rather than silently reading potentially incorrect data.
+#[derive(Debug, Clone)]
+pub struct YcdIndexEntry {
+    /// Absolute path to the YCD file.
+    pub path: PathBuf,
+    /// Byte offset at which compressed 8-byte blocks start.
+    pub data_offset: u64,
+    /// 1-based absolute digit position of this file's first digit.
+    pub file_start: usize,
+    /// Total number of digits stored in this file.
+    pub file_length: usize,
+    /// File size in bytes recorded at index-build time.
+    pub file_size: u64,
+    /// Last-modified time recorded at index-build time.
+    ///
+    /// On platforms where `std::fs::Metadata::modified()` is unavailable,
+    /// this field is set to `SystemTime::UNIX_EPOCH` at build time and
+    /// `read_digits` will also read `UNIX_EPOCH` for the current mtime,
+    /// so the comparison will always succeed.  On those platforms stale-index
+    /// detection relies solely on `file_size`.
+    pub modified: SystemTime,
+}
+
+/// An in-memory index over a contiguous set of YCD files.
+///
+/// Building the index reads every file's header once and stores the
+/// resulting metadata.  Subsequent `read_digits` calls use binary search
+/// to locate the relevant file(s) and seek directly to the target block,
+/// skipping every other file entirely.
+///
+/// # Stale-index detection
+///
+/// Each time a file is actually read, its current `file_size` and
+/// last-modified time are compared against the snapshot taken at build
+/// time.  If any difference is detected, `read_digits` returns
+/// `io::ErrorKind::InvalidData` with an explicit "stale index" message.
+/// There is no silent fallback to a full-scan path.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::io;
+/// use ycd_reader::YcdIndex;
+///
+/// fn main() -> io::Result<()> {
+///     let files = [
+///         "Pi - Dec - Chudnovsky - 0.ycd",
+///         "Pi - Dec - Chudnovsky - 1.ycd",
+///     ];
+///
+///     // Build the index once (reads all headers).
+///     let index = YcdIndex::build(&files)?;
+///
+///     // Fast random-access — only the relevant file(s) are opened.
+///     let digits = index.read_digits(999_995, 20)?;
+///     assert_eq!(digits, "45815130927562832084");
+///
+///     Ok(())
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct YcdIndex {
+    entries: Vec<YcdIndexEntry>,
+}
+
+impl YcdIndex {
+    /// Build an index from an ordered, contiguous slice of YCD file paths.
+    ///
+    /// Every file's header is read and validated (base-10 constraint,
+    /// contiguity, no duplicates, no gaps).  On success the index is ready
+    /// for `read_digits` calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`YcdFileUtil::read_digits`] for header and
+    /// continuity problems.  Additionally returns `InvalidInput` when `files`
+    /// is empty.
+    pub fn build<P: AsRef<Path>>(files: &[P]) -> io::Result<Self> {
+        if files.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "File list must not be empty",
+            ));
+        }
+
+        let raw_infos = collect_file_infos(files)?;
+        let mut entries = Vec::with_capacity(files.len());
+
+        for (path, fi) in files.iter().zip(raw_infos.iter()) {
+            let fs_meta = std::fs::metadata(path.as_ref())?;
+            let file_size = fs_meta.len();
+            let modified = fs_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+            entries.push(YcdIndexEntry {
+                path: std::fs::canonicalize(path.as_ref())?,
+                data_offset: fi.data_offset,
+                file_start: fi.file_start,
+                file_length: fi.file_length,
+                file_size,
+                modified,
+            });
+        }
+
+        Ok(Self { entries })
+    }
+
+    /// Discard the current index and rebuild it from a new file list.
+    ///
+    /// On success `self` is replaced with the freshly built index.  If the
+    /// rebuild fails, `self` is left unchanged.
+    pub fn rebuild<P: AsRef<Path>>(&mut self, files: &[P]) -> io::Result<()> {
+        *self = Self::build(files)?;
+        Ok(())
+    }
+
+    /// Returns the number of YCD files in the index.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if the index contains no files.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns a slice of all index entries in digit order.
+    pub fn entries(&self) -> &[YcdIndexEntry] {
+        &self.entries
+    }
+
+    /// Read exactly `length` decimal digits starting at 1-based position
+    /// `one_based_start_position`.
+    ///
+    /// Binary search locates the first file that contains the start position.
+    /// Only the file(s) actually needed are opened; all other files are
+    /// skipped entirely.
+    ///
+    /// Before reading each file, its current `file_size` and last-modified
+    /// time are compared against the index snapshot.  A mismatch returns
+    /// `io::ErrorKind::InvalidData` with an "index is stale" message.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | `io::ErrorKind` |
+    /// |---|---|
+    /// | Index is empty, position 0, or length 0 | `InvalidInput` |
+    /// | Start or end position outside the indexed range | `InvalidInput` |
+    /// | `start + length` overflows `usize` | `InvalidData` |
+    /// | File size or mtime differs from index snapshot | `InvalidData` |
+    /// | File does not exist | `NotFound` |
+    /// | Payload truncated within logical range | `UnexpectedEof` |
+    /// | Output string pre-allocation failure | `Other` |
+    pub fn read_digits(
+        &self,
+        one_based_start_position: usize,
+        length: usize,
+    ) -> io::Result<String> {
+        if self.entries.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Index is empty",
+            ));
+        }
+        if one_based_start_position == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Start position must be >= 1",
+            ));
+        }
+        if length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Length must be >= 1",
+            ));
+        }
+
+        let list_start = self.entries[0].file_start;
+        let last = self.entries.last().expect("non-empty");
+        let list_end = last
+            .file_start
+            .checked_add(last.file_length)
+            .and_then(|e| e.checked_sub(1))
+            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
+
+        if one_based_start_position < list_start || one_based_start_position > list_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Start position {one_based_start_position} is outside the available range \
+                     [{list_start}, {list_end}]"
+                ),
+            ));
+        }
+
+        let end_position = one_based_start_position
+            .checked_add(length)
+            .ok_or_else(|| invalid_data("End position overflow (start + length)"))?
+            .checked_sub(1)
+            .expect("length >= 1");
+
+        if end_position > list_end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Requested range ends at {end_position} which exceeds the available \
+                     range end {list_end}"
+                ),
+            ));
+        }
+
+        let mut result = String::new();
+        result.try_reserve_exact(length).map_err(io::Error::other)?;
+
+        // Binary search: find the first entry whose last digit >= start position.
+        let start_idx = self
+            .entries
+            .partition_point(|e| e.file_start + e.file_length - 1 < one_based_start_position);
+
+        let mut remaining = length;
+
+        for entry in &self.entries[start_idx..] {
+            if remaining == 0 {
+                break;
+            }
+
+            // Validate the file against the index snapshot before opening it.
+            let fs_meta = std::fs::metadata(&entry.path)?;
+            if fs_meta.len() != entry.file_size {
+                return Err(invalid_data(format!(
+                    "Index is stale: file size of '{}' changed \
+                     (expected {} bytes, found {} bytes)",
+                    entry.path.display(),
+                    entry.file_size,
+                    fs_meta.len(),
+                )));
+            }
+            let current_modified = fs_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if current_modified != entry.modified {
+                return Err(invalid_data(format!(
+                    "Index is stale: last-modified time of '{}' changed",
+                    entry.path.display(),
+                )));
+            }
+
+            let digits_read = length - remaining;
+            let current_abs = one_based_start_position
+                .checked_add(digits_read)
+                .expect("validated end_position <= list_end");
+
+            let local_start = current_abs
+                .checked_sub(entry.file_start)
+                .ok_or_else(|| invalid_data("local_start underflow"))?;
+            let available = entry
+                .file_length
+                .checked_sub(local_start)
+                .ok_or_else(|| invalid_data("local_start exceeds file length"))?;
+            let to_take = available.min(remaining);
+
+            let (block_index, offset_in_block, blocks_to_read) =
+                compute_seek_params(local_start, to_take);
+
+            let seek_pos = entry
+                .data_offset
+                .checked_add(
+                    u64::try_from(block_index)
+                        .ok()
+                        .and_then(|bi| bi.checked_mul(8))
+                        .ok_or_else(|| invalid_data("Seek offset overflow"))?,
+                )
+                .ok_or_else(|| invalid_data("Seek offset overflow"))?;
+
+            let mut reader = BufReader::new(File::open(&entry.path)?);
+            reader.seek(io::SeekFrom::Start(seek_pos))?;
+
+            let mut skip = offset_in_block;
+            let mut taken = 0usize;
+
+            for _ in 0..blocks_to_read {
+                if taken >= to_take {
+                    break;
+                }
+
+                let mut buf = [0_u8; 8];
+                reader.read_exact(&mut buf).map_err(|e| match e.kind() {
+                    io::ErrorKind::UnexpectedEof => io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "YCD payload is shorter than the logical digit range",
+                    ),
+                    _ => e,
+                })?;
+
+                let number = u64::from_le_bytes(buf);
+                let block_str = format!("{number:019}");
+                if block_str.len() != DIGITS_PER_BLOCK {
+                    return Err(invalid_data(
+                        "A compressed block contains more than 19 decimal digits",
+                    ));
+                }
+
+                let usable = &block_str[skip..];
+                skip = 0;
+
+                let can_take = usable.len().min(to_take - taken);
+                result.push_str(&usable[..can_take]);
+                taken += can_take;
+            }
+
+            remaining -= to_take;
+        }
+
+        debug_assert_eq!(result.len(), length);
+        Ok(result)
+    }
+}
+
+// ─── FileInfo (internal) ──────────────────────────────────────────────────────
 
 /// Per-file metadata used by [`YcdFileUtil::read_digits`].
 struct FileInfo {
