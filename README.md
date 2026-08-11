@@ -25,7 +25,7 @@ Build once         Fast reads           Refresh when files change
 YcdIndex::build    index.read_digits    index.rebuild
 ```
 
-### Building the index
+### Building the index and reading digits
 
 ```rust
 use std::io;
@@ -40,24 +40,6 @@ fn main() -> io::Result<()> {
     // Build the index once: reads all headers and validates continuity.
     let index = YcdIndex::build(&files)?;
     println!("{} files indexed", index.len());
-
-    Ok(())
-}
-```
-
-### Reading digits via the index
-
-```rust
-use std::io;
-use ycd_reader::YcdIndex;
-
-fn main() -> io::Result<()> {
-    let files = [
-        "Pi - Dec - Chudnovsky - 0.ycd",
-        "Pi - Dec - Chudnovsky - 1.ycd",
-    ];
-
-    let index = YcdIndex::build(&files)?;
 
     // Fast random-access — only the file(s) containing the requested range
     // are opened.  All other files are skipped entirely.
