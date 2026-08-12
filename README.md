@@ -1,31 +1,34 @@
 # ycd-reader
 
 `ycd-reader` is a Rust library for reading base-10 compressed digit files
-(`.ycd`) produced by y-cruncher.
+(`.ycd`) produced by [y-cruncher](https://www.numberworld.org/y-cruncher/).
+
+YCD files produced by [y-cruncher](https://www.numberworld.org/y-cruncher/)
+can grow to enormous sizes, and the number
+of files can be huge as well. `ycd-reader` is designed to handle such large
+datasets comfortably even on low-power hardware.
+
+Instead of scanning or loading whole files, every read seeks directly to
+the target block. As a result, memory usage for each read is proportional to
+the requested output, not to file size.
 
 Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
 little-endian block. The library restores those blocks to digit strings and
 returns them in caller-selected processing units.
 
-## In-memory index: `YcdIndex`
+## File header cache: `YcdIndex`
 
-`YcdIndex` builds an in-memory index over a contiguous set of YCD files by
-reading every file's header once.  Subsequent `read_digits` calls use binary
-search to locate the relevant file(s) and seek directly to the target block,
-leaving all other files untouched.
+`YcdIndex` targets large, mostly static collections of YCD files and caches
+the header information for a contiguous set of files in memory.
 
-This is the recommended path when you have a large, mostly-static collection
-of YCD files and want to avoid scanning every header on each request.
+Subsequent calls such as `read_digits` use the cached header information to
+locate the target file and seek directly to the desired block, without
+accessing any other files.
 
-### Lifecycle
+Build the index once, reuse it for fast reads, and rebuild it when the
+underlying YCD files change.
 
-``` text
-Build once         Fast reads           Refresh when files change
-─────────────      ──────────────────   ───────────────────────────
-YcdIndex::build    index.read_digits    index.rebuild
-```
-
-### Building the index and reading digits
+### Building, reading, and updating the index
 
 ```rust
 use std::io;
@@ -38,7 +41,7 @@ fn main() -> io::Result<()> {
     ];
 
     // Build the index once: reads all headers and validates continuity.
-    let index = YcdIndex::build(&files)?;
+    let mut index = YcdIndex::build(&files)?;
     println!("{} files indexed", index.len());
 
     // Fast random-access — only the file(s) containing the requested range
@@ -46,28 +49,18 @@ fn main() -> io::Result<()> {
     let digits = index.read_digits(999_995, 20)?;
     assert_eq!(digits, "45815130927562832084");
 
+    // Later, a new file is appended to the set. Call `rebuild` to discard
+    // the old index and build a fresh one over the updated file list. If
+    // the rebuild fails, the old index is left intact.
+    let new_files = [
+        "Pi - Dec - Chudnovsky - 0.ycd",
+        "Pi - Dec - Chudnovsky - 1.ycd",
+        "Pi - Dec - Chudnovsky - 2.ycd",
+    ];
+    index.rebuild(&new_files)?;
+
     Ok(())
 }
-```
-
-### Updating the index
-
-When the file set changes (files added, removed, or replaced), call
-`rebuild` to discard the old index and build a fresh one.  If the rebuild
-fails the old index is left intact.
-
-```rust
-# use std::io;
-# use ycd_reader::YcdIndex;
-# fn main() -> io::Result<()> {
-# let files: &[&str] = &[];
-let mut index = YcdIndex::build(files)?;
-
-// Later, after files change:
-let new_files = ["Pi - Dec - Chudnovsky - 0.ycd", "Pi - Dec - Chudnovsky - 1.ycd"];
-index.rebuild(&new_files)?;
-# Ok(())
-# }
 ```
 
 ### Stale-index detection
@@ -326,3 +319,14 @@ Licensed under either of the following, at your option:
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+## Acknowledgments
+
+This library exists to read digit files produced by
+[y-cruncher](https://www.numberworld.org/y-cruncher/), Alexander J. Yee's
+multi-threaded program for high-performance and record-setting computation
+of mathematical constants.
+
+The `.ycd` format and its semantics originate from y-cruncher.
+This project is an independent, unofficial reader and is not affiliated with or endorsed
+by its author.
