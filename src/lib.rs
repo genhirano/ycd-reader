@@ -1,3 +1,174 @@
+//! `ycd-reader` is a Rust library for reading decimal digits from base-10
+//! compressed digit files (`.ycd`) produced by
+//! [y-cruncher](https://www.numberworld.org/y-cruncher/) — the digits of π
+//! or of any other constant.
+//!
+//! y-cruncher computes many mathematical constants — π, e, √2, and more —
+//! and writes `.ycd` files in both base 10 and base 16. This library reads
+//! the base-10 files of any such constant: nothing in it is π-specific, and
+//! the constant stored in the file is never inspected. Base-16 files are
+//! rejected.
+//!
+//! Digit files can contain enormous sequences of decimal digits and may be
+//! spread across many files. `ycd-reader` is designed to handle such large
+//! datasets comfortably even on low-power hardware.
+//!
+//! For random-access reads, the library seeks directly to the compressed block
+//! containing the requested digits instead of scanning or loading whole files.
+//! Memory usage is therefore determined by the requested output and processing
+//! unit size rather than by the size of the underlying YCD files.
+//!
+//! Each 8-byte payload block stores up to 19 decimal digits as an unsigned 64-bit
+//! little-endian integer. The library restores those blocks to digit strings and
+//! returns them in caller-selected processing units. `unit_size` must be at
+//! least 19 (one block's worth of digits); smaller values make the stream
+//! constructors return `io::ErrorKind::InvalidInput`. A `unit_size` that is a
+//! multiple of 19 is recommended: it lines up with block boundaries, so every
+//! unit is filled from whole blocks with no leftover digits carried over
+//! (and re-copied) into the next unit.
+//!
+//! # Choosing an API
+//!
+//! | API | Use case |
+//! | --- | --- |
+//! | [`YcdFileUtil::read_digits`] | One-off random-access read, no state retained |
+//! | [`YcdIndex::read_digits`] | Repeated random-access reads over a stable file set |
+//! | [`YcdMultiFileStream`] | Sequential processing across contiguous files |
+//! | [`YcdSeqBlockStream`] | Sequential processing of a single file |
+//!
+//! Both stream types also expose `new_from`, which starts iteration at an
+//! arbitrary 1-based digit position instead of the beginning of the file (or
+//! file set), so a stream can resume mid-range without re-reading from the
+//! start. See [`YcdSeqBlockStream::new_from`] and
+//! [`YcdMultiFileStream::new_from`].
+//!
+//! # Random-access: read a specific digit range
+//!
+//! [`YcdFileUtil::read_digits`] reads exactly `length` digits starting at a
+//! 1-based absolute position from an ordered list of contiguous YCD files.
+//!
+//! The entire file list is validated before any payload I/O begins, and the
+//! function seeks directly to the compressed block that contains the first
+//! requested digit. No bytes before the target block are read.
+//!
+//! Use this API when you need a one-off random-access read and do not need to
+//! retain file-header metadata for subsequent requests.
+//!
+//! # File header cache: [`YcdIndex`]
+//!
+//! `YcdIndex` targets large, mostly static collections of YCD files and caches
+//! the header information for a contiguous set of files in memory.
+//!
+//! Subsequent calls such as `read_digits` use the cached header information to
+//! locate the target file and seek directly to the desired block, without opening
+//! or reading payload data from unrelated YCD files.
+//!
+//! Build the index once, reuse it for fast reads, and rebuild it when the
+//! underlying YCD files change.
+//!
+//! ## Building and reading the index
+//!
+//! ```rust,no_run
+//! use std::io;
+//! use ycd_reader::YcdIndex;
+//!
+//! fn main() -> io::Result<()> {
+//!     // The YCD files that make up the target digit set.
+//!     let files = [
+//!         "Pi - Dec - Chudnovsky - 0.ycd",
+//!         "Pi - Dec - Chudnovsky - 1.ycd",
+//!     ];
+//!
+//!     // Build the index once: reads all headers and validates continuity.
+//!     let mut index = YcdIndex::build(&files)?;
+//!
+//!     // Fast random-access — only the file(s) containing the requested range
+//!     // are opened. All other files are skipped entirely.
+//!     let digits = index.read_digits(999_995, 20)?;
+//!     assert_eq!(digits, "45815130927562832084");
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Stale-index detection
+//!
+//! Once a YCD file set has been prepared, it is usually kept stable for long
+//! periods. If the set is changed while the index is still in use, the cached
+//! header metadata may no longer match the current files.
+//!
+//! Each time a file is actually read, its current `file_size` and last-modified
+//! time are compared against the snapshot recorded at build time. If they differ,
+//! `read_digits` returns `io::ErrorKind::InvalidData` with an explicit
+//! **"index is stale"** message.
+//!
+//! There is no silent fallback to a full-scan path. The caller must explicitly
+//! call `rebuild` to refresh the index.
+//!
+//! For the full table of error conditions, see [`YcdIndex::read_digits`].
+//!
+//! # Reading contiguous files (sequential)
+//!
+//! [`YcdMultiFileStream`] reads a contiguous sequence of YCD files as a single
+//! logical digit stream. The files are validated in order before reading begins,
+//! so the stream can reliably treat the collection as one continuous range even
+//! when a processing unit spans a file boundary.
+//!
+//! This is useful when you want to consume the digit stream in order, without
+//! manually stitching the file boundaries together. Each yielded unit contains a
+//! slice of decimal digits, and the stream automatically continues across file
+//! boundaries when needed.
+//!
+//! Processing only one file? [`YcdSeqBlockStream`] is the single-file
+//! counterpart that `YcdMultiFileStream` uses internally, and is available
+//! directly when a multi-file stream is more than you need.
+//!
+//! ```rust,no_run
+//! use std::io;
+//! use ycd_reader::YcdMultiFileStream;
+//!
+//! fn main() -> io::Result<()> {
+//!     let files = [
+//!         "Pi - Dec - Chudnovsky - 0.ycd",
+//!         "Pi - Dec - Chudnovsky - 1.ycd",
+//!         "Pi - Dec - Chudnovsky - 2.ycd",
+//!     ];
+//!
+//!     // 19,000 digits per unit — a multiple of 19, so every unit is filled
+//!     // from whole compressed blocks (see the crate-level notes above).
+//!     let mut stream = YcdMultiFileStream::new(&files, 19_000)?;
+//!
+//!     while stream.has_next() {
+//!         let unit = stream.next()?;
+//!         consume(&unit.value);
+//!     }
+//!
+//!     Ok(())
+//! }
+//!
+//! fn consume(_digits: &str) {}
+//! ```
+//!
+//! # File-range rules
+//!
+//! | Header field | Logical length of the file |
+//! | --- | --- |
+//! | `TotalDigits > 0` | `min(Blocksize, TotalDigits − Blocksize × BlockID)` |
+//! | `TotalDigits == 0` | `Blocksize` |
+//!
+//! A file with `TotalDigits == 0` is assumed to contain exactly `Blocksize`
+//! digits. If the actual payload is shorter than the logical range,
+//! `UnexpectedEof` is returned.
+//!
+//! # Errors
+//!
+//! The non-indexed APIs validate the requested range and the ordered YCD file
+//! set before reading payload data. Each read API documents its own error
+//! conditions in full: see [`YcdFileUtil::read_digits`] for the non-indexed
+//! random-access path and [`YcdIndex::read_digits`] for the indexed path.
+
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
@@ -8,26 +179,63 @@ use strum_macros::{AsRefStr, EnumString};
 
 const DIGITS_PER_BLOCK: usize = 19;
 
+/// A field name in the text header of a YCD file.
+///
+/// The header of a `.ycd` file is a sequence of `Name: value` text lines
+/// terminated by an `EndHeader` marker. This enum identifies the fields this
+/// library reads; it is used as the key type of the map returned by
+/// [`YcdFileUtil::get_ycd_header`].
+///
+/// Note that at the header level a "block" means one file's digit span
+/// (`Blocksize` digits per file), not the 8-byte compressed words of the
+/// payload.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, AsRefStr, EnumString)]
 pub enum YcdHeaderInfoElem {
+    /// Version string of the YCD file format (e.g. `1.1.0`). Must be non-empty.
     FileVersion,
+    /// Numeric base of the stored digits. y-cruncher writes base 10 and
+    /// base 16 files; this library accepts base 10 only.
     Base,
+    /// The leading digits of the constant as plain text (e.g. `3.14159...`),
+    /// stored for human inspection. Must be non-empty; the content is not
+    /// otherwise validated.
     FirstDigits,
+    /// Total number of digits in the entire digit set across all files.
+    /// May be `0` (unknown), in which case each file is assumed to contain
+    /// exactly `Blocksize` digits.
     TotalDigits,
+    /// Total number of files (header-level blocks) in the set. Optional;
+    /// validated as a nonnegative integer when present but otherwise unused.
     TotalBlocks,
+    /// Number of digits each file in the set holds.
     Blocksize,
+    /// 0-based index of this file within the set. The file covers absolute
+    /// digit positions `Blocksize × BlockID + 1` onward.
     BlockID,
+    /// Marker line that terminates the header section. Not a `Name: value`
+    /// field; it never appears in the returned header map.
     EndHeader,
 }
 
+/// One unit of digits yielded by [`YcdSeqBlockStream`] or [`YcdMultiFileStream`].
+///
+/// Every call to a stream's `next` produces one `YcdProcessUnit` holding up to
+/// `unit_size` decoded digits. All units except possibly the last are exactly
+/// `unit_size` digits long.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct YcdProcessUnit {
+    /// 1-based sequence number of this unit within the stream
+    /// (1 for the first unit returned, incremented by 1 for each `next` call).
     pub process_no: i64,
+    /// 1-based absolute digit position of the first digit in `value`.
     pub start_digit: i64,
+    /// The decoded digits as an ASCII decimal string.
     pub value: String,
 }
 
 impl YcdProcessUnit {
+    /// Create a unit from its parts. Normally only used internally by the
+    /// stream types; provided for constructing test fixtures.
     pub fn new(process_no: i64, start_digit: i64, value: String) -> Self {
         Self {
             process_no,
@@ -44,6 +252,23 @@ struct YcdMetadata {
     digit_start: i64,
 }
 
+/// Sequential reader over a single YCD file, yielding digits in fixed-size units.
+///
+/// This is the single-file counterpart to [`YcdMultiFileStream`] (which uses
+/// it internally). Iterate with the [`has_next`](Self::has_next) /
+/// [`next`](Self::next) pair:
+///
+/// - `has_next` returns `true` while undelivered digits remain.
+/// - `next` returns the next [`YcdProcessUnit`]. Every unit except possibly
+///   the last is exactly `unit_size` digits long.
+/// - Calling `next` after the stream is exhausted (i.e. when `has_next`
+///   returns `false`) returns `io::ErrorKind::UnexpectedEof` with a
+///   "No more data to read" message.
+///
+/// The stream deliberately does not implement [`Iterator`]: `next` returns
+/// `io::Result<&YcdProcessUnit>` — a fallible, borrowed result whose reference
+/// is only valid until the following `next` call — which the `Iterator`
+/// contract cannot express.
 #[derive(Debug)]
 pub struct YcdSeqBlockStream {
     process_unit_size: usize,
@@ -58,6 +283,19 @@ pub struct YcdSeqBlockStream {
 }
 
 impl YcdSeqBlockStream {
+    /// Open a YCD file and begin sequential reading from its first digit.
+    ///
+    /// `unit_size` is the number of digits delivered per [`next`](Self::next)
+    /// call. It must be at least 19 (one compressed block's worth of digits);
+    /// smaller values return `io::ErrorKind::InvalidInput`. A multiple of 19
+    /// is recommended so that every unit is filled from whole blocks (see the
+    /// crate-level documentation).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `unit_size < 19`, `NotFound` when the file
+    /// does not exist, and `InvalidData` when the header is malformed or the
+    /// file is not base 10.
     pub fn new<P: AsRef<Path>>(file_name: P, unit_size: i32) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         let path = file_name.as_ref();
@@ -82,7 +320,7 @@ impl YcdSeqBlockStream {
     ///
     /// `start_position` is the 1-based absolute digit index at which reading should start.
     /// It must lie within the range covered by this file
-    /// (`digit_start .. digit_start + digit_length - 1`, inclusive).
+    /// (`digit_start ..= digit_start + digit_length - 1`).
     ///
     /// The `unit_size` and iteration interface are identical to [`Self::new`].
     pub fn new_from<P: AsRef<Path>>(
@@ -168,10 +406,23 @@ impl YcdSeqBlockStream {
         })
     }
 
+    /// Returns `true` while undelivered digits remain in this stream.
     pub fn has_next(&self) -> bool {
         self.decoded_digits < self.digit_length || !self.surplus_digit_str.is_empty()
     }
 
+    /// Read and return the next unit of digits.
+    ///
+    /// Every unit except possibly the last is exactly `unit_size` digits long.
+    /// The returned reference is valid until the following `next` call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io::ErrorKind::UnexpectedEof` with a "No more data to read"
+    /// message when the stream is already exhausted ([`has_next`](Self::has_next)
+    /// returns `false`), `UnexpectedEof` when the payload is shorter than the
+    /// logical digit range, and `InvalidData` when a compressed block decodes
+    /// to more than 19 digits.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> io::Result<&YcdProcessUnit> {
         if !self.has_next() {
@@ -230,6 +481,23 @@ impl YcdSeqBlockStream {
     }
 }
 
+/// Sequential reader over a contiguous sequence of YCD files, treated as one
+/// logical digit stream.
+///
+/// All files are validated for header correctness and list continuity when
+/// the stream is created, so iteration can safely cross file boundaries —
+/// a unit that spans two files is stitched together transparently.
+///
+/// The iteration contract is the same as [`YcdSeqBlockStream`]:
+/// [`has_next`](Self::has_next) returns `true` while undelivered digits
+/// remain, [`next`](Self::next) yields units of exactly `unit_size` digits
+/// (except possibly the last), and calling `next` after exhaustion returns
+/// `io::ErrorKind::UnexpectedEof` with a "No more data to read" message.
+///
+/// Like `YcdSeqBlockStream`, this type deliberately does not implement
+/// [`Iterator`]: `next` returns `io::Result<&YcdProcessUnit>` — a fallible,
+/// borrowed result whose reference is only valid until the following `next`
+/// call — which the `Iterator` contract cannot express.
 #[derive(Debug)]
 pub struct YcdMultiFileStream {
     process_unit_size: usize,
@@ -241,6 +509,21 @@ pub struct YcdMultiFileStream {
 }
 
 impl YcdMultiFileStream {
+    /// Open an ordered, contiguous list of YCD files and begin sequential
+    /// reading from the first digit of the first file.
+    ///
+    /// `unit_size` is the number of digits delivered per [`next`](Self::next)
+    /// call. It must be at least 19 (one compressed block's worth of digits);
+    /// smaller values return `io::ErrorKind::InvalidInput`. A multiple of 19
+    /// is recommended so that every unit is filled from whole blocks (see the
+    /// crate-level documentation).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `unit_size < 19`, when `file_names` is
+    /// empty, or when the files are not contiguous; `NotFound` when a file
+    /// does not exist; and `InvalidData` when a header is malformed or a file
+    /// is not base 10.
     pub fn new<P: AsRef<Path>>(file_names: &[P], unit_size: i32) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         if file_names.is_empty() {
@@ -362,12 +645,26 @@ impl YcdMultiFileStream {
         })
     }
 
+    /// Returns `true` while undelivered digits remain in any of the files.
     pub fn has_next(&self) -> bool {
         self.streams[self.current_stream..]
             .iter()
             .any(YcdSeqBlockStream::has_next)
     }
 
+    /// Read and return the next unit of digits, crossing file boundaries
+    /// transparently when a unit spans two files.
+    ///
+    /// Every unit except possibly the last is exactly `unit_size` digits long.
+    /// The returned reference is valid until the following `next` call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io::ErrorKind::UnexpectedEof` with a "No more data to read"
+    /// message when the stream is already exhausted ([`has_next`](Self::has_next)
+    /// returns `false`), `UnexpectedEof` when a payload is shorter than its
+    /// logical digit range, and `InvalidData` when a compressed block decodes
+    /// to more than 19 digits.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> io::Result<&YcdProcessUnit> {
         if !self.has_next() {
@@ -740,30 +1037,56 @@ struct FileInfo {
 /// - `block_index`: 0-based index of the first 8-byte block to read.
 /// - `offset_in_block`: digits to skip at the start of the first decoded block.
 /// - `blocks_to_read`: the minimum number of blocks that cover the requested range.
-///
-/// This function has no side effects and is exposed for unit-testing the direct-seek logic.
-pub fn compute_seek_params(local_start: usize, length: usize) -> (usize, usize, usize) {
+pub(crate) fn compute_seek_params(local_start: usize, length: usize) -> (usize, usize, usize) {
     let block_index = local_start / DIGITS_PER_BLOCK;
     let offset_in_block = local_start % DIGITS_PER_BLOCK;
     let blocks_to_read = (offset_in_block + length).div_ceil(DIGITS_PER_BLOCK);
     (block_index, offset_in_block, blocks_to_read)
 }
 
+/// Stateless utility functions for one-off reads and header inspection.
+///
+/// Unlike [`YcdIndex`], these functions keep no state between calls: every
+/// call re-reads and re-validates the headers of the files it is given. For
+/// repeated random-access reads over the same file set, build a [`YcdIndex`]
+/// once instead.
 pub struct YcdFileUtil;
 
 impl YcdFileUtil {
+    /// Return the size of the file's header section in bytes.
+    ///
+    /// This is the byte offset at which the compressed digit payload (the
+    /// first 8-byte block) begins: it covers the `Name: value` header lines,
+    /// the `EndHeader` line, and the NUL data marker that follows it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` when the file does not exist, and `InvalidData`
+    /// when the header is malformed, the file is not base 10, or the header
+    /// size does not fit in `i32`.
     pub fn get_header_size<P: AsRef<Path>>(file_name: P) -> io::Result<i32> {
         i32::try_from(parse_metadata(file_name.as_ref())?.data_offset)
             .map_err(|_| invalid_data("YCD header is too large"))
     }
 
+    /// Parse the file's header and return its fields as a map.
+    ///
+    /// The map is keyed by [`YcdHeaderInfoElem`]; values are the raw
+    /// (trimmed) strings from the `Name: value` header lines. Only the
+    /// fields this library recognizes are included, and `EndHeader` never
+    /// appears as a key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` when the file does not exist, and `InvalidData`
+    /// when the header is malformed or the file is not base 10.
     pub fn get_ycd_header<P: AsRef<Path>>(
         file_name: P,
     ) -> io::Result<HashMap<YcdHeaderInfoElem, String>> {
         Ok(parse_metadata(file_name.as_ref())?.header)
     }
 
-    /// Read exactly `length` decimal digits of Pi starting at 1-based position
+    /// Read exactly `length` decimal digits starting at 1-based position
     /// `one_based_start_position` from the concatenation of the given YCD files.
     ///
     /// # Arguments
@@ -772,8 +1095,9 @@ impl YcdFileUtil {
     ///   The first file need not have BlockID 0; absolute positions are derived
     ///   from each file's header.
     /// * `one_based_start_position` — 1-based index of the first digit to return.
-    ///   Position 1 is the first decimal digit (the digit immediately after "3.").
-    ///   The integer part, sign, and decimal point are never included.
+    ///   Position 1 is the first stored digit of the constant's fractional part
+    ///   (for π, the digit immediately after "3."). The integer part, sign, and
+    ///   decimal point are never included.
     /// * `length` — Number of digits to return. The result string is exactly
     ///   `length` bytes of ASCII digits.
     ///
@@ -1193,4 +1517,62 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn no_more_data_error() -> io::Error {
     io::Error::new(io::ErrorKind::UnexpectedEof, "No more data to read")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_seek_params;
+
+    #[test]
+    fn seek_params_unit_tests() {
+        // Position 1 within file → block_index = 0
+        let (bi, oib, btr) = compute_seek_params(0, 1);
+        assert_eq!(bi, 0);
+        assert_eq!(oib, 0);
+        assert_eq!(btr, 1);
+
+        // Full first block
+        let (bi, oib, btr) = compute_seek_params(0, 19);
+        assert_eq!(bi, 0);
+        assert_eq!(oib, 0);
+        assert_eq!(btr, 1);
+
+        // First block + one digit into second block → 2 blocks needed
+        let (bi, oib, btr) = compute_seek_params(0, 20);
+        assert_eq!(bi, 0);
+        assert_eq!(oib, 0);
+        assert_eq!(btr, 2);
+
+        // blocks_to_read == ceil((offset_in_block + length) / 19) for various inputs
+        for local_start in [0_usize, 1, 18, 19, 37, 38, 100, 1_000_000] {
+            for length in [1_usize, 2, 18, 19, 20, 38, 39, 100] {
+                let (_, offset_in_block, btr) = compute_seek_params(local_start, length);
+                let expected_btr = (offset_in_block + length).div_ceil(19);
+                assert_eq!(
+                    btr, expected_btr,
+                    "local_start={local_start} length={length}"
+                );
+            }
+        }
+
+        // At ~1M position, block_index must be non-zero
+        // For 1M file (BlockID=0), local_start of position 999_995 is 999_994
+        let local_start_1m = 999_994_usize;
+        let (bi, oib, btr) = compute_seek_params(local_start_1m, 6);
+        assert!(bi > 0, "block_index should be non-zero near 1M: got {bi}");
+        assert_eq!(bi, local_start_1m / 19); // 999994 / 19 = 52631
+        assert_eq!(oib, local_start_1m % 19); // 999994 % 19 = 5
+                                              // Taking 6 digits with oib=5: need ceil((5+6)/19) = 1 block
+        assert_eq!(btr, 1);
+
+        // Cross-file: each file uses only the necessary blocks
+        // Reading read_digits(&[file0, file1], 999_995, 20):
+        //   file0: local_start=999994, to_take=6  → (52631, 5, 1)
+        //   file1: local_start=0,      to_take=14 → (0, 0, 1)
+        let (bi0, oib0, btr0) = compute_seek_params(999_994, 6);
+        assert_eq!((bi0, oib0, btr0), (52631, 5, 1));
+
+        let (bi1, oib1, btr1) = compute_seek_params(0, 14);
+        assert_eq!((bi1, oib1, btr1), (0, 0, 1));
+    }
 }
