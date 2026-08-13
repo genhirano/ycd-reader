@@ -1,61 +1,47 @@
 # ycd-reader
 
-This library reads decimal digits of π stored in y-cruncher YCD files.
+[![Crates.io](https://img.shields.io/crates/v/ycd-reader.svg)](https://crates.io/crates/ycd-reader)
+[![docs.rs](https://docs.rs/ycd-reader/badge.svg)](https://docs.rs/ycd-reader)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+This library reads decimal digits stored in y-cruncher YCD files — the
+digits of π or of any other constant.
 
 `ycd-reader` is a Rust library for reading base-10 compressed digit files
 (`.ycd`) produced by [y-cruncher](https://www.numberworld.org/y-cruncher/).
-These files can contain enormous sequences of decimal digits, including the
-digits of π, and may be spread across many files. `ycd-reader` is designed
-to handle such large datasets comfortably even on low-power hardware.
+y-cruncher computes many mathematical constants — π, e, √2, and more — and
+writes `.ycd` files in both base 10 and base 16. This library reads the
+base-10 files of any such constant: nothing in it is π-specific, and the
+constant stored in the file is never inspected. Base-16 files are rejected.
 
-For random-access reads, the library seeks directly to the compressed block
-containing the requested digits instead of scanning or loading whole files.
-Memory usage is therefore determined by the requested output and processing
-unit size rather than by the size of the underlying YCD files.
+Digit files can contain enormous sequences of decimal digits and may be
+spread across many files. `ycd-reader` is designed to handle such large
+datasets comfortably even on low-power hardware, seeking directly to the
+compressed block containing the requested digits instead of scanning or
+loading whole files.
 
-Each 8-byte payload block stores up to 19 decimal digits as an unsigned 64-bit
-little-endian integer. The library restores those blocks to digit strings and
-returns them in caller-selected processing units.
+For API details, usage guidance for each type, and the full error reference,
+see the [documentation on docs.rs](https://docs.rs/ycd-reader).
 
-## Choosing an API
+## Installation
 
-| API | Use case |
-| --- | --- |
-| `YcdIndex::read_digits` | Repeated random-access reads over a stable file set |
-| `YcdMultiFileStream` | Sequential processing across contiguous files |
+```toml
+[dependencies]
+ycd-reader = "0.2"
+```
 
-## Random-access: read a specific digit range
+Requires Rust 1.85 or later (2021 edition).
 
-`YcdFileUtil::read_digits` reads exactly `length` digits starting at a
-1-based absolute position from an ordered list of contiguous YCD files.
+## Quick start
 
-The entire file list is validated before any payload I/O begins, and the
-function seeks directly to the compressed block that contains the first
-requested digit. No bytes before the target block are read.
-
-Use this API when you need a one-off random-access read and do not need to
-retain file-header metadata for subsequent requests.
-
-## File header cache: `YcdIndex`
-
-`YcdIndex` targets large, mostly static collections of YCD files and caches
-the header information for a contiguous set of files in memory.
-
-Subsequent calls such as `read_digits` use the cached header information to
-locate the target file and seek directly to the desired block, without opening
-or reading payload data from unrelated YCD files.
-
-Build the index once, reuse it for fast reads, and rebuild it when the
-underlying YCD files change.
-
-### Building and reading the index
+### Random-access read
 
 ```rust
 use std::io;
 use ycd_reader::YcdIndex;
 
 fn main() -> io::Result<()> {
-    // The YCD files that make up the target digit set.
+    // List the split .ycd files in order.
     let files = [
         "Pi - Dec - Chudnovsky - 0.ycd",
         "Pi - Dec - Chudnovsky - 1.ycd",
@@ -66,6 +52,9 @@ fn main() -> io::Result<()> {
 
     // Fast random-access — only the file(s) containing the requested range
     // are opened. All other files are skipped entirely.
+    // Read 20 digits starting at the 999,995th decimal digit of π (1-indexed,
+    // so this is digits 999,995–1,000,014). This range straddles both files
+    // above (file 0 ends at digit 1,000,000), but only those two are opened.
     let digits = index.read_digits(999_995, 20)?;
     assert_eq!(digits, "45815130927562832084");
 
@@ -73,43 +62,10 @@ fn main() -> io::Result<()> {
 }
 ```
 
-### Stale-index detection
+### Sequential read
 
-Once a YCD file set has been prepared, it is usually kept stable for long
-periods. If the set is changed while the index is still in use, the cached
-header metadata may no longer match the current files.
-
-Each time a file is actually read, its current `file_size` and last-modified
-time are compared against the snapshot recorded at build time. If they differ,
-`read_digits` returns `io::ErrorKind::InvalidData` with an explicit
-**"index is stale"** message.
-
-There is no silent fallback to a full-scan path. The caller must explicitly
-call `rebuild` to refresh the index.
-
-### `YcdIndex::read_digits` errors
-
-| Condition | `io::ErrorKind` |
-| --- | --- |
-| Index is empty, position 0, or length 0 | `InvalidInput` |
-| Start or end position outside indexed range | `InvalidInput` |
-| `start + length` overflows `usize` | `InvalidData` |
-| File size or mtime differs from index snapshot | `InvalidData` |
-| File does not exist | `NotFound` |
-| Payload truncated within logical range | `UnexpectedEof` |
-| Output string pre-allocation failure | `Other` |
-
-## Reading contiguous files (sequential)
-
-`YcdMultiFileStream` reads a contiguous sequence of YCD files as a single
-logical digit stream. The files are validated in order before reading begins,
-so the stream can reliably treat the collection as one continuous range even
-when a processing unit spans a file boundary.
-
-This is useful when you want to consume the digit stream in order, without
-manually stitching the file boundaries together. Each yielded unit contains a
-slice of decimal digits, and the stream automatically continues across file
-boundaries when needed.
+For streaming through digits from the start (e.g. exporting all digits),
+use `YcdMultiFileStream` instead of building an index for random access.
 
 ```rust
 use std::io;
@@ -119,55 +75,49 @@ fn main() -> io::Result<()> {
     let files = [
         "Pi - Dec - Chudnovsky - 0.ycd",
         "Pi - Dec - Chudnovsky - 1.ycd",
-        "Pi - Dec - Chudnovsky - 2.ycd",
     ];
 
-    let mut stream = YcdMultiFileStream::new(&files, 1_000)?;
-
+    // Walk the digits in fixed-size chunks of 19,000 digits (1,000 compressed
+    // blocks per chunk), advancing across file boundaries automatically.
+    // The chunk size must be at least 19 (one compressed block's worth of
+    // digits); smaller values are rejected with InvalidInput.
+    // A chunk size that is a multiple of 19 is recommended: each compressed
+    // block decodes to exactly 19 digits, so a multiple of 19 lines up with
+    // block boundaries and every chunk is filled from whole blocks, with no
+    // leftover digits carried over (and re-copied) into the next chunk.
+    let mut stream = YcdMultiFileStream::new(&files, 19000)?;
     while stream.has_next() {
         let unit = stream.next()?;
-        consume(&unit.value);
+        println!("digit {}: {}", unit.start_digit, unit.value);
     }
 
     Ok(())
 }
-
-fn consume(_digits: &str) {}
 ```
 
-## File-range rules
+### Other APIs
 
-| Header field | Logical length of the file |
-| --- | --- |
-| `TotalDigits > 0` | `min(Blocksize, TotalDigits − Blocksize × BlockID)` |
-| `TotalDigits == 0` | `Blocksize` |
+Beyond the two examples above, the crate also provides:
 
-A file with `TotalDigits == 0` is assumed to contain exactly `Blocksize`
-digits. If the actual payload is shorter than the logical range,
-`UnexpectedEof` is returned.
+- `YcdSeqBlockStream` — sequential read over a single `.ycd` file (the single-file counterpart to `YcdMultiFileStream`).
+- `new_from` (on both stream types) — start sequential reading from an arbitrary digit position instead of the first.
+- `YcdFileUtil::read_digits` — a one-off random-access read across files without building/keeping a `YcdIndex`.
+- `YcdFileUtil::get_ycd_header` / `get_header_size` — inspect a file's raw header fields (digit count, block size, etc.) directly.
 
-## Errors
+## Contributing
 
-The non-indexed APIs validate the requested range and the ordered YCD file set
-before reading payload data.
+Issues and pull requests are welcome. Before submitting a change, run:
 
-| Condition | `io::ErrorKind` |
-| --- | --- |
-| Empty file list, position 0, or length 0 | `InvalidInput` |
-| Start position out of range, or end exceeds range | `InvalidInput` |
-| Gap, duplicate, or reversed files in list | `InvalidInput` |
-| Invalid header, non-base-10, or corrupt block | `InvalidData` |
-| Position or offset calculation overflow | `InvalidData` |
-| File does not exist | `NotFound` |
-| Payload truncated within logical range | `UnexpectedEof` |
-| Output string pre-allocation failure | `Other` |
+```sh
+cargo test
+```
 
 ## License
 
 Licensed under either of the following, at your option:
 
-- Apache License, Version 2.0 (LICENSE-APACHE)
-- MIT license (LICENSE-MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 ## Acknowledgments
 

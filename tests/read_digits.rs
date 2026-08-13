@@ -3,7 +3,7 @@ mod common;
 use std::io;
 
 use common::{golden_digits, one_million_path, two_million_path, TempYcd};
-use ycd_reader::{compute_seek_params, YcdFileUtil};
+use ycd_reader::YcdFileUtil;
 
 fn make_corrupt_block_ycd(blocksize: usize) -> Vec<u8> {
     let header = format!(
@@ -557,57 +557,5 @@ fn read_digits_error_bad_file_content() {
     );
 }
 
-// --- Implementation-method verification tests --------------------------------
-
-#[test]
-fn seek_params_unit_tests() {
-    // Position 1 within file → block_index = 0
-    let (bi, oib, btr) = compute_seek_params(0, 1);
-    assert_eq!(bi, 0);
-    assert_eq!(oib, 0);
-    assert_eq!(btr, 1);
-
-    // Full first block
-    let (bi, oib, btr) = compute_seek_params(0, 19);
-    assert_eq!(bi, 0);
-    assert_eq!(oib, 0);
-    assert_eq!(btr, 1);
-
-    // First block + one digit into second block → 2 blocks needed
-    let (bi, oib, btr) = compute_seek_params(0, 20);
-    assert_eq!(bi, 0);
-    assert_eq!(oib, 0);
-    assert_eq!(btr, 2);
-
-    // blocks_to_read == ceil((offset_in_block + length) / 19) for various inputs
-    for local_start in [0_usize, 1, 18, 19, 37, 38, 100, 1_000_000] {
-        for length in [1_usize, 2, 18, 19, 20, 38, 39, 100] {
-            let (_, offset_in_block, btr) = compute_seek_params(local_start, length);
-            let expected_btr = (offset_in_block + length).div_ceil(19);
-            assert_eq!(
-                btr, expected_btr,
-                "local_start={local_start} length={length}"
-            );
-        }
-    }
-
-    // At ~1M position, block_index must be non-zero
-    // For 1M file (BlockID=0), local_start of position 999_995 is 999_994
-    let local_start_1m = 999_994_usize;
-    let (bi, oib, btr) = compute_seek_params(local_start_1m, 6);
-    assert!(bi > 0, "block_index should be non-zero near 1M: got {bi}");
-    assert_eq!(bi, local_start_1m / 19); // 999994 / 19 = 52631
-    assert_eq!(oib, local_start_1m % 19); // 999994 % 19 = 5
-                                          // Taking 6 digits with oib=5: need ceil((5+6)/19) = 1 block
-    assert_eq!(btr, 1);
-
-    // Cross-file: each file uses only the necessary blocks
-    // Reading read_digits(&[file0, file1], 999_995, 20):
-    //   file0: local_start=999994, to_take=6  → (52631, 5, 1)
-    //   file1: local_start=0,      to_take=14 → (0, 0, 1)
-    let (bi0, oib0, btr0) = compute_seek_params(999_994, 6);
-    assert_eq!((bi0, oib0, btr0), (52631, 5, 1));
-
-    let (bi1, oib1, btr1) = compute_seek_params(0, 14);
-    assert_eq!((bi1, oib1, btr1), (0, 0, 1));
-}
+// The seek-parameter unit tests live in src/lib.rs (`mod tests`), next to the
+// now-private `compute_seek_params` implementation.
