@@ -1,3 +1,8 @@
+//! Digit positions, digit counts, processing-unit sizes, and process numbers use
+//! `usize` throughout the public API. Absolute digit positions and process
+//! numbers are 1-based. Values must fit in `usize` on the target platform;
+//! byte offsets use `u64` for file seeking.
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
@@ -22,13 +27,13 @@ pub enum YcdHeaderInfoElem {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct YcdProcessUnit {
-    pub process_no: i64,
-    pub start_digit: i64,
+    pub process_no: usize,
+    pub start_digit: usize,
     pub value: String,
 }
 
 impl YcdProcessUnit {
-    pub fn new(process_no: i64, start_digit: i64, value: String) -> Self {
+    pub fn new(process_no: usize, start_digit: usize, value: String) -> Self {
         Self {
             process_no,
             start_digit,
@@ -40,25 +45,25 @@ impl YcdProcessUnit {
 struct YcdMetadata {
     header: HashMap<YcdHeaderInfoElem, String>,
     data_offset: u64,
-    digit_length: i64,
-    digit_start: i64,
+    digit_length: usize,
+    digit_start: usize,
 }
 
 #[derive(Debug)]
 pub struct YcdSeqBlockStream {
     process_unit_size: usize,
     file_stream: BufReader<File>,
-    digit_length: i64,
-    digit_start: i64,
-    decoded_digits: i64,
-    next_process_no: i64,
-    next_start_digit: i64,
+    digit_length: usize,
+    digit_start: usize,
+    decoded_digits: usize,
+    next_process_no: usize,
+    next_start_digit: usize,
     current_process_unit: Option<YcdProcessUnit>,
     surplus_digit_str: String,
 }
 
 impl YcdSeqBlockStream {
-    pub fn new<P: AsRef<Path>>(file_name: P, unit_size: i32) -> io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(file_name: P, unit_size: usize) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         let path = file_name.as_ref();
         let metadata = parse_metadata(path)?;
@@ -87,8 +92,8 @@ impl YcdSeqBlockStream {
     /// The `unit_size` and iteration interface are identical to [`Self::new`].
     pub fn new_from<P: AsRef<Path>>(
         file_name: P,
-        unit_size: i32,
-        start_position: i64,
+        unit_size: usize,
+        start_position: usize,
     ) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         let path = file_name.as_ref();
@@ -110,12 +115,9 @@ impl YcdSeqBlockStream {
             ));
         }
 
-        let local_start = usize::try_from(
-            start_position
-                .checked_sub(metadata.digit_start)
-                .ok_or_else(|| invalid_data("local_start underflow"))?,
-        )
-        .map_err(|_| invalid_data("local_start overflows usize"))?;
+        let local_start = start_position
+            .checked_sub(metadata.digit_start)
+            .ok_or_else(|| invalid_data("local_start underflow"))?;
 
         let block_index = local_start / DIGITS_PER_BLOCK;
         let offset_in_block = local_start % DIGITS_PER_BLOCK;
@@ -133,7 +135,7 @@ impl YcdSeqBlockStream {
         let mut file_stream = BufReader::new(File::open(path)?);
         file_stream.seek(io::SeekFrom::Start(seek_pos))?;
 
-        let mut decoded_digits = (block_index * DIGITS_PER_BLOCK) as i64;
+        let mut decoded_digits = block_index * DIGITS_PER_BLOCK;
         let mut surplus_digit_str = String::new();
 
         if offset_in_block > 0 {
@@ -147,10 +149,9 @@ impl YcdSeqBlockStream {
                 ));
             }
 
-            let remaining = usize::try_from(metadata.digit_length - decoded_digits)
-                .map_err(|_| invalid_data("Invalid remaining digit count"))?;
+            let remaining = metadata.digit_length - decoded_digits;
             let take = remaining.min(DIGITS_PER_BLOCK);
-            decoded_digits += take as i64;
+            decoded_digits += take;
 
             surplus_digit_str.push_str(&digits[offset_in_block..take]);
         }
@@ -188,7 +189,7 @@ impl YcdSeqBlockStream {
             .ok_or_else(|| invalid_data("Process number overflow"))?;
         self.next_start_digit = self
             .next_start_digit
-            .checked_add(value.len() as i64)
+            .checked_add(value.len())
             .ok_or_else(|| invalid_data("Digit position overflow"))?;
         self.current_process_unit = Some(YcdProcessUnit::new(process_no, start_digit, value));
 
@@ -221,10 +222,9 @@ impl YcdSeqBlockStream {
             ));
         }
 
-        let remaining = usize::try_from(self.digit_length - self.decoded_digits)
-            .map_err(|_| invalid_data("Invalid remaining digit count"))?;
+        let remaining = self.digit_length - self.decoded_digits;
         let take = remaining.min(DIGITS_PER_BLOCK);
-        self.decoded_digits += take as i64;
+        self.decoded_digits += take;
 
         Ok(digits[..take].to_string())
     }
@@ -235,13 +235,13 @@ pub struct YcdMultiFileStream {
     process_unit_size: usize,
     streams: Vec<YcdSeqBlockStream>,
     current_stream: usize,
-    next_process_no: i64,
-    next_start_digit: i64,
+    next_process_no: usize,
+    next_start_digit: usize,
     current_process_unit: Option<YcdProcessUnit>,
 }
 
 impl YcdMultiFileStream {
-    pub fn new<P: AsRef<Path>>(file_names: &[P], unit_size: i32) -> io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(file_names: &[P], unit_size: usize) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         if file_names.is_empty() {
             return Err(io::Error::new(
@@ -297,8 +297,8 @@ impl YcdMultiFileStream {
     /// The `unit_size` and iteration interface are identical to [`Self::new`].
     pub fn new_from<P: AsRef<Path>>(
         file_names: &[P],
-        unit_size: i32,
-        start_position: i64,
+        unit_size: usize,
+        start_position: usize,
     ) -> io::Result<Self> {
         let process_unit_size = validate_unit_size(unit_size)?;
         if file_names.is_empty() {
@@ -307,7 +307,7 @@ impl YcdMultiFileStream {
                 "At least one YCD file is required",
             ));
         }
-        if start_position < 1 {
+        if start_position == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Start position must be >= 1",
@@ -316,7 +316,7 @@ impl YcdMultiFileStream {
 
         let file_infos = collect_file_infos(file_names)?;
 
-        let list_start = file_infos[0].file_start as i64;
+        let list_start = file_infos[0].file_start;
         let last = file_infos
             .last()
             .expect("non-empty after collect_file_infos");
@@ -324,7 +324,7 @@ impl YcdMultiFileStream {
             .file_start
             .checked_add(last.file_length)
             .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit range end overflow"))? as i64;
+            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
 
         if start_position < list_start || start_position > list_end {
             return Err(io::Error::new(
@@ -336,8 +336,8 @@ impl YcdMultiFileStream {
             ));
         }
 
-        let start_file_idx = file_infos
-            .partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position as usize);
+        let start_file_idx =
+            file_infos.partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position);
 
         let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
         for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
@@ -374,7 +374,10 @@ impl YcdMultiFileStream {
             return Err(no_more_data_error());
         }
 
-        let mut value = String::with_capacity(self.process_unit_size);
+        let mut value = String::new();
+        value
+            .try_reserve_exact(self.process_unit_size)
+            .map_err(io::Error::other)?;
         while value.len() < self.process_unit_size && self.current_stream < self.streams.len() {
             let remaining = self.process_unit_size - value.len();
             let stream = &mut self.streams[self.current_stream];
@@ -393,7 +396,7 @@ impl YcdMultiFileStream {
             .ok_or_else(|| invalid_data("Process number overflow"))?;
         self.next_start_digit = self
             .next_start_digit
-            .checked_add(value.len() as i64)
+            .checked_add(value.len())
             .ok_or_else(|| invalid_data("Digit position overflow"))?;
         self.current_process_unit = Some(YcdProcessUnit::new(process_no, start_digit, value));
 
@@ -973,14 +976,14 @@ impl YcdFileUtil {
     }
 }
 
-fn validate_unit_size(unit_size: i32) -> io::Result<usize> {
-    if unit_size < DIGITS_PER_BLOCK as i32 {
+fn validate_unit_size(unit_size: usize) -> io::Result<usize> {
+    if unit_size < DIGITS_PER_BLOCK {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Unit size must be at least 19",
         ));
     }
-    Ok(unit_size as usize)
+    Ok(unit_size)
 }
 
 fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
@@ -1014,8 +1017,8 @@ fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
 
     consume_data_marker(&mut reader)?;
     let data_offset = reader.stream_position()?;
-    let block_size = parse_positive_i64(&header, YcdHeaderInfoElem::Blocksize)?;
-    let block_id = parse_nonnegative_i64(&header, YcdHeaderInfoElem::BlockID)?;
+    let block_size = parse_positive_usize(&header, YcdHeaderInfoElem::Blocksize)?;
+    let block_id = parse_usize(&header, YcdHeaderInfoElem::BlockID)?;
 
     let version = required_value(&header, YcdHeaderInfoElem::FileVersion)?;
     if version.is_empty() {
@@ -1025,13 +1028,13 @@ fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
         return Err(invalid_data("FirstDigits must not be empty"));
     }
 
-    let base = parse_nonnegative_i64(&header, YcdHeaderInfoElem::Base)?;
+    let base = parse_usize(&header, YcdHeaderInfoElem::Base)?;
     if base != 10 {
         return Err(invalid_data("Only base 10 YCD files are supported"));
     }
-    let total_digits = parse_nonnegative_i64(&header, YcdHeaderInfoElem::TotalDigits)?;
+    let total_digits = parse_usize(&header, YcdHeaderInfoElem::TotalDigits)?;
     if header.contains_key(&YcdHeaderInfoElem::TotalBlocks) {
-        parse_nonnegative_i64(&header, YcdHeaderInfoElem::TotalBlocks)?;
+        parse_usize(&header, YcdHeaderInfoElem::TotalBlocks)?;
     }
 
     let digit_offset = block_size
@@ -1117,34 +1120,24 @@ fn required_value(
         .ok_or_else(|| invalid_data(format!("Missing required header field: {}", key.as_ref())))
 }
 
-fn parse_positive_i64(
+fn parse_positive_usize(
     header: &HashMap<YcdHeaderInfoElem, String>,
     key: YcdHeaderInfoElem,
-) -> io::Result<i64> {
-    let value = parse_nonnegative_i64(header, key)?;
+) -> io::Result<usize> {
+    let value = parse_usize(header, key)?;
     if value == 0 {
         return Err(invalid_data(format!("{} must be positive", key.as_ref())));
     }
     Ok(value)
 }
 
-fn parse_nonnegative_i64(
+fn parse_usize(
     header: &HashMap<YcdHeaderInfoElem, String>,
     key: YcdHeaderInfoElem,
-) -> io::Result<i64> {
+) -> io::Result<usize> {
     required_value(header, key)?
-        .parse::<i64>()
+        .parse::<usize>()
         .map_err(|_| invalid_data(format!("{} must be a nonnegative integer", key.as_ref())))
-        .and_then(|value| {
-            if value < 0 {
-                Err(invalid_data(format!(
-                    "{} must be a nonnegative integer",
-                    key.as_ref()
-                )))
-            } else {
-                Ok(value)
-            }
-        })
 }
 
 /// Parse metadata for every file in `files`, validate header correctness and
@@ -1157,10 +1150,8 @@ fn collect_file_infos<P: AsRef<Path>>(files: &[P]) -> io::Result<Vec<FileInfo>> 
     for path in files {
         let meta = parse_metadata(path.as_ref())?;
 
-        let file_start = usize::try_from(meta.digit_start)
-            .map_err(|_| invalid_data("Digit start position overflows usize"))?;
-        let file_length = usize::try_from(meta.digit_length)
-            .map_err(|_| invalid_data("Digit length overflows usize"))?;
+        let file_start = meta.digit_start;
+        let file_length = meta.digit_length;
 
         if let Some(prev) = infos.last() {
             let expected = prev
