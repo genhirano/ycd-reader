@@ -717,7 +717,12 @@ impl YcdIndex {
             remaining -= to_take;
         }
 
-        debug_assert_eq!(result.len(), length);
+        if result.len() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Decoded digits length is shorter than requested length",
+            ));
+        }
         Ok(result)
     }
 }
@@ -968,7 +973,12 @@ impl YcdFileUtil {
             remaining -= to_take;
         }
 
-        debug_assert_eq!(result.len(), length);
+        if result.len() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Decoded digits length is shorter than requested length",
+            ));
+        }
         Ok(result)
     }
 }
