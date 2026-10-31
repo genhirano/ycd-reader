@@ -996,7 +996,7 @@ fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
 
         let text = std::str::from_utf8(&line)
             .map_err(|_| invalid_data("YCD header is not valid UTF-8"))?;
-        let text = text.trim_end_matches(&['\r', '\n'][..]);
+        let text = text.trim();
         if text == YcdHeaderInfoElem::EndHeader.as_ref() {
             break;
         }
