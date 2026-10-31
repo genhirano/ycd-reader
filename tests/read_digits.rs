@@ -560,6 +560,32 @@ fn read_digits_error_bad_file_content() {
 // --- Implementation-method verification tests --------------------------------
 
 #[test]
+fn seek_params_zero_length() {
+    for local_start in (0_usize..38).chain([usize::MAX]) {
+        assert_eq!(
+            compute_seek_params(local_start, 0),
+            (local_start / 19, local_start % 19, 0)
+        );
+    }
+}
+
+#[test]
+fn seek_params_maximum_total_digits() {
+    for local_start in [0_usize, 1, 18] {
+        assert_eq!(
+            compute_seek_params(local_start, usize::MAX - local_start),
+            (0, local_start, usize::MAX.div_ceil(19))
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "offset_in_block + length overflow")]
+fn seek_params_overflow() {
+    compute_seek_params(1, usize::MAX);
+}
+
+#[test]
 fn seek_params_unit_tests() {
     // Position 1 within file → block_index = 0
     let (bi, oib, btr) = compute_seek_params(0, 1);
