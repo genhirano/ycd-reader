@@ -2,7 +2,9 @@ mod common;
 
 use std::io;
 
-use common::{collect_multi, golden_digits, one_million_path, two_million_path, TempYcd};
+use common::{
+    collect_multi, collect_multi_from, golden_digits, one_million_path, two_million_path, TempYcd,
+};
 use ycd_reader::YcdMultiFileStream;
 
 #[test]
@@ -97,5 +99,19 @@ fn multi_file_stream_joins_generated_files_inside_process_units() {
     assert_eq!(
         collect_multi(&[&first.path, &second.path, &third.path], 25).unwrap(),
         expected
+    );
+}
+
+#[test]
+fn multi_file_streams_open_large_file_lists_without_exhausting_descriptors() {
+    let files: Vec<_> = (0..1_100)
+        .map(|block_id| TempYcd::valid("1", 1, block_id, "\n", "").unwrap())
+        .collect();
+    let paths: Vec<_> = files.iter().map(|file| &file.path).collect();
+
+    assert_eq!(collect_multi(&paths, 19).unwrap(), "1".repeat(files.len()));
+    assert_eq!(
+        collect_multi_from(&paths, 19, 1).unwrap(),
+        "1".repeat(files.len())
     );
 }

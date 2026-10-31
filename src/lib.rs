@@ -49,7 +49,6 @@ pub struct YcdSeqBlockStream {
     process_unit_size: usize,
     file_stream: BufReader<File>,
     digit_length: i64,
-    digit_start: i64,
     decoded_digits: i64,
     next_process_no: i64,
     next_start_digit: i64,
@@ -69,7 +68,6 @@ impl YcdSeqBlockStream {
             process_unit_size,
             file_stream,
             digit_length: metadata.digit_length,
-            digit_start: metadata.digit_start,
             decoded_digits: 0,
             next_process_no: 1,
             next_start_digit: metadata.digit_start,
@@ -159,7 +157,6 @@ impl YcdSeqBlockStream {
             process_unit_size,
             file_stream,
             digit_length: metadata.digit_length,
-            digit_start: metadata.digit_start,
             decoded_digits,
             next_process_no: 1,
             next_start_digit: start_position,
@@ -233,8 +230,9 @@ impl YcdSeqBlockStream {
 #[derive(Debug)]
 pub struct YcdMultiFileStream {
     process_unit_size: usize,
-    streams: Vec<YcdSeqBlockStream>,
-    current_stream: usize,
+    file_names: Vec<PathBuf>,
+    current_stream: Option<YcdSeqBlockStream>,
+    current_file: usize,
     next_process_no: i64,
     next_start_digit: i64,
     current_process_unit: Option<YcdProcessUnit>,
@@ -250,32 +248,18 @@ impl YcdMultiFileStream {
             ));
         }
 
-        let mut streams = Vec::with_capacity(file_names.len());
-        for file_name in file_names {
-            streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
-        }
-
-        for pair in streams.windows(2) {
-            let expected_start = pair[0]
-                .digit_start
-                .checked_add(pair[0].digit_length)
-                .ok_or_else(|| invalid_data("Digit position overflow"))?;
-            if pair[1].digit_start != expected_start {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "YCD files are not contiguous: expected digit {expected_start}, found {}",
-                        pair[1].digit_start
-                    ),
-                ));
-            }
-        }
-
-        let next_start_digit = streams[0].digit_start;
+        let file_infos = collect_file_infos(file_names)?;
+        let file_names: Vec<PathBuf> = file_names
+            .iter()
+            .map(|file_name| file_name.as_ref().to_path_buf())
+            .collect();
+        let current_stream = Some(YcdSeqBlockStream::new(&file_names[0], unit_size)?);
+        let next_start_digit = file_infos[0].file_start as i64;
         Ok(Self {
             process_unit_size,
-            streams,
-            current_stream: 0,
+            file_names,
+            current_stream,
+            current_file: 0,
             next_process_no: 1,
             next_start_digit,
             current_process_unit: None,
@@ -288,7 +272,9 @@ impl YcdMultiFileStream {
     /// `start_position` is the 1-based absolute digit index at which reading
     /// should start.  It must lie within the combined range of all files in
     /// the list.  All files in `file_names` are validated for header
-    /// correctness and list continuity before any payload I/O begins.
+    /// correctness and list continuity before any payload I/O begins. Only
+    /// the file containing `start_position` is opened initially; later files
+    /// are opened as they are reached.
     ///
     /// Files that end before `start_position` are skipped entirely; only the
     /// file that contains `start_position` (and all subsequent files) are
@@ -339,23 +325,21 @@ impl YcdMultiFileStream {
         let start_file_idx = file_infos
             .partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position as usize);
 
-        let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
-        for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
-            if i == 0 {
-                streams.push(YcdSeqBlockStream::new_from(
-                    file_name,
-                    unit_size,
-                    start_position,
-                )?);
-            } else {
-                streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
-            }
-        }
+        let file_names: Vec<PathBuf> = file_names[start_file_idx..]
+            .iter()
+            .map(|file_name| file_name.as_ref().to_path_buf())
+            .collect();
+        let current_stream = Some(YcdSeqBlockStream::new_from(
+            &file_names[0],
+            unit_size,
+            start_position,
+        )?);
 
         Ok(Self {
             process_unit_size,
-            streams,
-            current_stream: 0,
+            file_names,
+            current_stream,
+            current_file: 0,
             next_process_no: 1,
             next_start_digit: start_position,
             current_process_unit: None,
@@ -363,9 +347,10 @@ impl YcdMultiFileStream {
     }
 
     pub fn has_next(&self) -> bool {
-        self.streams[self.current_stream..]
-            .iter()
-            .any(YcdSeqBlockStream::has_next)
+        self.current_stream
+            .as_ref()
+            .is_some_and(YcdSeqBlockStream::has_next)
+            || self.current_file < self.file_names.len()
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -375,13 +360,24 @@ impl YcdMultiFileStream {
         }
 
         let mut value = String::with_capacity(self.process_unit_size);
-        while value.len() < self.process_unit_size && self.current_stream < self.streams.len() {
+        while value.len() < self.process_unit_size && self.current_file < self.file_names.len() {
+            if self.current_stream.is_none() {
+                self.current_stream = Some(YcdSeqBlockStream::new(
+                    &self.file_names[self.current_file],
+                    self.process_unit_size as i32,
+                )?);
+            }
+
             let remaining = self.process_unit_size - value.len();
-            let stream = &mut self.streams[self.current_stream];
+            let stream = self
+                .current_stream
+                .as_mut()
+                .expect("current stream was opened");
             value.push_str(&stream.take_digits(remaining)?);
 
             if !stream.has_next() {
-                self.current_stream += 1;
+                self.current_stream = None;
+                self.current_file += 1;
             }
         }
 
