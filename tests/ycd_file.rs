@@ -75,6 +75,44 @@ fn long_headers_and_lf_line_endings_are_supported() {
 }
 
 #[test]
+fn whitespace_padded_end_header_preserves_the_exact_data_offset() {
+    let digits = "1234567890123456789";
+    for line_ending in ["\n", "\r\n"] {
+        for marker in ["EndHeader ", "EndHeader\t", " \tEndHeader \t"] {
+            let header = format!(
+                "FileVersion: 1.1.0{e}Base: 10{e}FirstDigits: 3.14{e}\
+                 TotalDigits: 0{e}Blocksize: 19{e}BlockID: 0{e}{marker}{e}{e}\0",
+                e = line_ending
+            );
+            let mut bytes = header.as_bytes().to_vec();
+            bytes.extend(1_234_567_890_123_456_789_u64.to_le_bytes());
+            let file = TempYcd::from_bytes(&bytes).unwrap();
+
+            assert_eq!(
+                YcdFileUtil::get_header_size(&file.path).unwrap(),
+                header.len() as i32
+            );
+            assert_eq!(collect_single(&file.path, 19).unwrap(), digits);
+        }
+    }
+}
+
+#[test]
+fn indented_comments_and_whitespace_only_lines_are_ignored() {
+    let digits = "1234567890123456789";
+    for line_ending in ["\n", "\r\n"] {
+        let extra_header = format!("   # comment{e}\t# Base: 16{e} \t {e}", e = line_ending);
+        let file = TempYcd::valid(digits, digits.len(), 0, line_ending, &extra_header).unwrap();
+
+        assert_eq!(
+            YcdFileUtil::get_ycd_header(&file.path).unwrap()[&YcdHeaderInfoElem::Base],
+            "10"
+        );
+        assert_eq!(collect_single(&file.path, 19).unwrap(), digits);
+    }
+}
+
+#[test]
 fn invalid_inputs_and_headers_return_specific_errors() {
     assert_eq!(
         YcdSeqBlockStream::new("does-not-exist.ycd", 18)
