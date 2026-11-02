@@ -334,3 +334,111 @@ fn index_does_not_open_unneeded_files() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     assert!(err.to_string().contains("stale"));
 }
+
+// ─── Additional Comprehensive Tests ──────────────────────────────────────────
+
+#[test]
+fn read_digits_spanning_three_files() {
+    let golden = golden_digits();
+    let files = [
+        one_million_path(0),
+        one_million_path(1),
+        one_million_path(2),
+    ];
+    let idx = YcdIndex::build(&files).unwrap();
+
+    // Read from position 999_990 with length 1_000_030:
+    // Takes 11 digits from file 0, all 1_000_000 digits from file 1,
+    // and 19 digits from file 2.
+    let start = 999_990;
+    let len = 1_000_030;
+    let result = idx.read_digits(start, len).unwrap();
+    assert_eq!(result.len(), len);
+    assert_eq!(result, &golden[start - 1..start - 1 + len]);
+}
+
+#[test]
+fn rebuild_with_empty_list_leaves_index_intact_and_usable() {
+    let files1 = [one_million_path(0)];
+    let mut idx = YcdIndex::build(&files1).unwrap();
+    let empty: [&str; 0] = [];
+
+    assert_eq!(
+        idx.rebuild(&empty).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx.read_digits(1, 10).unwrap(), "1415926535");
+}
+
+#[test]
+fn rebuild_with_corrupt_file_leaves_index_intact_and_usable() {
+    let files1 = [one_million_path(0)];
+    let mut idx = YcdIndex::build(&files1).unwrap();
+
+    let bad_tmp = TempYcd::from_bytes(b"corrupt content").unwrap();
+    assert!(idx.rebuild(&[&bad_tmp.path]).is_err());
+
+    // Still intact and usable
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx.read_digits(1, 10).unwrap(), "1415926535");
+}
+
+#[test]
+fn index_read_digits_after_file_deleted_returns_not_found() {
+    let tmp = TempYcd::valid("1415926535897932384", 19, 0, "\n", "").unwrap();
+    let idx = YcdIndex::build(&[&tmp.path]).unwrap();
+
+    // Delete the file on disk
+    std::fs::remove_file(&tmp.path).unwrap();
+
+    let err = idx.read_digits(1, 10).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn index_entries_metadata_inspection() {
+    let files = [one_million_path(0), one_million_path(1)];
+    let idx = YcdIndex::build(&files).unwrap();
+    assert_eq!(idx.len(), 2);
+    assert!(!idx.is_empty());
+
+    let entries = idx.entries();
+    assert_eq!(entries.len(), 2);
+
+    for (i, entry) in entries.iter().enumerate() {
+        assert!(entry.path.is_absolute());
+        assert!(entry.path.exists());
+        assert!(entry.data_offset > 0);
+        assert_eq!(entry.file_length, 1_000_000);
+        assert_eq!(entry.file_start, 1 + i * 1_000_000);
+        assert!(entry.file_size > 0);
+        // Debug format check
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("file_start"));
+    }
+
+    // Debug format of YcdIndex
+    let idx_debug = format!("{idx:?}");
+    assert!(idx_debug.contains("entries"));
+}
+
+#[test]
+fn read_digits_boundary_edge_cases() {
+    let idx = YcdIndex::build(&[one_million_path(0)]).unwrap();
+
+    // Exact last digit of the file
+    assert_eq!(idx.read_digits(1_000_000, 1).unwrap(), "1");
+
+    // Exceeds by 1 digit
+    assert_eq!(
+        idx.read_digits(1_000_001, 1).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+
+    // End exceeds by 1 digit
+    assert_eq!(
+        idx.read_digits(999_999, 3).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
