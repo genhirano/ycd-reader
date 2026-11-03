@@ -143,6 +143,46 @@ fn multi_file_streams_open_subsequent_files_lazily() {
 }
 
 #[test]
+fn multi_file_streams_canonicalize_relative_paths_before_lazy_open() {
+    const CHILD_ENV: &str = "YCD_TEST_CANONICAL_CWD_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("multi_file_streams_canonicalize_relative_paths_before_lazy_open")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let first_digits = "1234567890123456789";
+    let second_digits = "9876543210987654321";
+    let first = TempYcd::valid(first_digits, 19, 0, "\n", "").unwrap();
+    let second = TempYcd::valid(second_digits, 19, 1, "\n", "").unwrap();
+    let temp_dir = first.path.parent().unwrap().to_path_buf();
+    let rel_paths = [
+        first.path.file_name().unwrap(),
+        second.path.file_name().unwrap(),
+    ];
+    let original_dir = std::env::current_dir().unwrap();
+
+    std::env::set_current_dir(&temp_dir).unwrap();
+    let mut stream = YcdMultiFileStream::new(&rel_paths, 19).unwrap();
+    let mut stream_from = YcdMultiFileStream::new_from(&rel_paths, 19, 1).unwrap();
+    std::env::set_current_dir(&original_dir).unwrap();
+
+    assert_eq!(stream.next().unwrap().value, first_digits);
+    assert_eq!(stream.next().unwrap().value, second_digits);
+    assert!(!stream.has_next());
+
+    assert_eq!(stream_from.next().unwrap().value, first_digits);
+    assert_eq!(stream_from.next().unwrap().value, second_digits);
+    assert!(!stream_from.has_next());
+}
+
+#[test]
 fn multi_stream_unit_size_spanning_entire_file() {
     let golden = golden_digits();
     let paths = [one_million_path(0), one_million_path(1)];
