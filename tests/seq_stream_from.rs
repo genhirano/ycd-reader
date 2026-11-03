@@ -18,10 +18,10 @@ fn seq_new_from_position_1_matches_new() {
 fn seq_new_from_mid_file_matches_golden_suffix() {
     // Start at an arbitrary position mid-file and verify the digits match the golden file.
     let golden = golden_digits();
-    let start: i64 = 500_000;
+    let start: usize = 500_000;
     let path = one_million_path(0);
     let result = collect_single_from(&path, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..1_000_000];
+    let expected = &golden[(start - 1)..1_000_000];
     assert_eq!(
         result, expected,
         "digits from position {start} should match golden"
@@ -33,10 +33,10 @@ fn seq_new_from_block_boundary_position() {
     // Position exactly at a block boundary (multiple of 19, converted to 1-based).
     let golden = golden_digits();
     // 19 * 10 = 190, so position 191 is the start of block 10 (0-based: local_start = 190).
-    let start: i64 = 191;
+    let start: usize = 191;
     let path = one_million_path(0);
     let result = collect_single_from(&path, 19, start).unwrap();
-    let expected = &golden[(start as usize - 1)..1_000_000];
+    let expected = &golden[(start - 1)..1_000_000];
     assert_eq!(result, expected);
 }
 
@@ -45,10 +45,10 @@ fn seq_new_from_mid_block_position() {
     // Position inside a block (offset_in_block > 0).
     let golden = golden_digits();
     // local_start = 99 → block_index=5, offset_in_block=4
-    let start: i64 = 100; // 1-based, local_start = 99
+    let start: usize = 100; // 1-based, local_start = 99
     let path = one_million_path(0);
     let result = collect_single_from(&path, 100, start).unwrap();
-    let expected = &golden[(start as usize - 1)..1_000_000];
+    let expected = &golden[(start - 1)..1_000_000];
     assert_eq!(result, expected);
 }
 
@@ -56,7 +56,7 @@ fn seq_new_from_mid_block_position() {
 fn seq_new_from_last_digit() {
     // Start at the very last digit of a file — should return exactly 1 digit.
     let golden = golden_digits();
-    let start: i64 = 1_000_000;
+    let start: usize = 1_000_000;
     let path = one_million_path(0);
     let result = collect_single_from(&path, 19, start).unwrap();
     assert_eq!(result.len(), 1);
@@ -69,9 +69,9 @@ fn seq_new_from_non_zero_blockid_file() {
     let golden = golden_digits();
     let path = one_million_path(1);
     // digit_start = 1_000_001, digit_end = 2_000_000
-    let start: i64 = 1_500_000;
+    let start: usize = 1_500_000;
     let result = collect_single_from(&path, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..2_000_000];
+    let expected = &golden[(start - 1)..2_000_000];
     assert_eq!(result, expected);
 }
 
