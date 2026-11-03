@@ -104,12 +104,14 @@ fn encode_digits(digits: &str) -> Vec<u8> {
     encoded
 }
 
-pub fn collect_single(path: impl AsRef<Path>, unit_size: i32) -> io::Result<String> {
+pub fn collect_single(path: impl AsRef<Path>, unit_size: usize) -> io::Result<String> {
     let header = YcdFileUtil::get_ycd_header(path.as_ref())?;
     let block_size = header[&YcdHeaderInfoElem::Blocksize]
-        .parse::<i64>()
+        .parse::<usize>()
         .unwrap();
-    let block_id = header[&YcdHeaderInfoElem::BlockID].parse::<i64>().unwrap();
+    let block_id = header[&YcdHeaderInfoElem::BlockID]
+        .parse::<usize>()
+        .unwrap();
     let mut expected_start = 1 + block_size * block_id;
     let mut expected_process_no = 1;
     let mut result = String::new();
@@ -120,7 +122,7 @@ pub fn collect_single(path: impl AsRef<Path>, unit_size: i32) -> io::Result<Stri
         assert_eq!(unit.process_no, expected_process_no);
         assert_eq!(unit.start_digit, expected_start);
         expected_process_no += 1;
-        expected_start += unit.value.len() as i64;
+        expected_start += unit.value.len();
         result.push_str(&unit.value);
     }
 
@@ -133,7 +135,7 @@ pub fn collect_single(path: impl AsRef<Path>, unit_size: i32) -> io::Result<Stri
 
 pub fn collect_single_prefix(
     path: impl AsRef<Path>,
-    unit_size: i32,
+    unit_size: usize,
     length: usize,
 ) -> io::Result<String> {
     let mut result = String::new();
@@ -145,13 +147,13 @@ pub fn collect_single_prefix(
     Ok(result)
 }
 
-pub fn collect_multi<P: AsRef<Path>>(paths: &[P], unit_size: i32) -> io::Result<String> {
+pub fn collect_multi<P: AsRef<Path>>(paths: &[P], unit_size: usize) -> io::Result<String> {
     let first_header = YcdFileUtil::get_ycd_header(paths[0].as_ref())?;
     let block_size = first_header[&YcdHeaderInfoElem::Blocksize]
-        .parse::<i64>()
+        .parse::<usize>()
         .unwrap();
     let block_id = first_header[&YcdHeaderInfoElem::BlockID]
-        .parse::<i64>()
+        .parse::<usize>()
         .unwrap();
     let mut expected_start = 1 + block_size * block_id;
     let mut expected_process_no = 1;
@@ -163,7 +165,7 @@ pub fn collect_multi<P: AsRef<Path>>(paths: &[P], unit_size: i32) -> io::Result<
         assert_eq!(unit.process_no, expected_process_no);
         assert_eq!(unit.start_digit, expected_start);
         expected_process_no += 1;
-        expected_start += unit.value.len() as i64;
+        expected_start += unit.value.len();
         result.push_str(&unit.value);
     }
 
@@ -176,20 +178,20 @@ pub fn collect_multi<P: AsRef<Path>>(paths: &[P], unit_size: i32) -> io::Result<
 
 pub fn collect_single_from(
     path: impl AsRef<Path>,
-    unit_size: i32,
-    start_position: i64,
+    unit_size: usize,
+    start_position: usize,
 ) -> io::Result<String> {
     let mut result = String::new();
     let mut stream = YcdSeqBlockStream::new_from(path, unit_size, start_position)?;
     let mut expected_start = start_position;
-    let mut expected_process_no: i64 = 1;
+    let mut expected_process_no: usize = 1;
 
     while stream.has_next() {
         let unit = stream.next()?.clone();
         assert_eq!(unit.process_no, expected_process_no);
         assert_eq!(unit.start_digit, expected_start);
         expected_process_no += 1;
-        expected_start += unit.value.len() as i64;
+        expected_start += unit.value.len();
         result.push_str(&unit.value);
     }
     assert_eq!(
@@ -201,20 +203,20 @@ pub fn collect_single_from(
 
 pub fn collect_multi_from<P: AsRef<Path>>(
     paths: &[P],
-    unit_size: i32,
-    start_position: i64,
+    unit_size: usize,
+    start_position: usize,
 ) -> io::Result<String> {
     let mut result = String::new();
     let mut stream = YcdMultiFileStream::new_from(paths, unit_size, start_position)?;
     let mut expected_start = start_position;
-    let mut expected_process_no: i64 = 1;
+    let mut expected_process_no: usize = 1;
 
     while stream.has_next() {
         let unit = stream.next()?.clone();
         assert_eq!(unit.process_no, expected_process_no);
         assert_eq!(unit.start_digit, expected_start);
         expected_process_no += 1;
-        expected_start += unit.value.len() as i64;
+        expected_start += unit.value.len();
         result.push_str(&unit.value);
     }
     assert_eq!(

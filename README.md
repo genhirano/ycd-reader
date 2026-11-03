@@ -7,6 +7,22 @@ Each YCD payload stores up to 19 decimal digits in an unsigned 64-bit
 little-endian block. The library restores those blocks to digit strings and
 returns them in caller-selected processing units.
 
+## Numeric API types
+
+All absolute digit positions, digit counts, processing-unit sizes, and process
+numbers use `usize`. Absolute positions and process numbers are 1-based, and
+processing-unit sizes must be at least 19. Byte offsets remain `u64`.
+Digit metadata must fit in `usize` on the target platform (32 bits on 32-bit
+targets, 64 bits on 64-bit targets); invalid or overflowing metadata returns
+`InvalidData`.
+
+This is a breaking change for streaming callers: `YcdProcessUnit::new`,
+`process_no`, `start_digit`, and both streams' `new_from` positions previously
+used `i64`, while `unit_size` used `i32`. Callers can now pass index positions
+and string lengths directly without casts. When migrating signed values, use
+`usize::try_from` to reject negative or out-of-range inputs rather than `as`.
+The random-access signatures are unchanged.
+
 ## In-memory index: `YcdIndex`
 
 `YcdIndex` builds an in-memory index over a contiguous set of YCD files by
@@ -305,8 +321,8 @@ fn consume(_digits: &str) {}
 
 `YcdFileUtil::get_ycd_header` returns recognized header fields, and
 `YcdFileUtil::get_header_size` returns the byte offset at which compressed
-blocks begin. Headers can use CRLF or LF line endings and are not restricted
-to a fixed buffer size.
+blocks begin as a `u64`. Headers can use CRLF or LF line endings and are not
+restricted to a fixed buffer size.
 
 Only base-10 YCD files are supported. Missing or invalid required fields,
 invalid payload blocks, truncated files, and noncontiguous file lists are

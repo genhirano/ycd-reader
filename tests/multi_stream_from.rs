@@ -19,9 +19,9 @@ fn multi_new_from_mid_first_file() {
     // Start mid-first-file and verify output matches golden from that position.
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 500_123;
+    let start: usize = 500_123;
     let result = collect_multi_from(&paths, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..3_000_000];
+    let expected = &golden[(start - 1)..3_000_000];
     assert_eq!(result, expected);
 }
 
@@ -30,9 +30,9 @@ fn multi_new_from_at_file_boundary() {
     // Start exactly at the first digit of the second file.
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 1_000_001; // digit_start of file #1
+    let start: usize = 1_000_001; // digit_start of file #1
     let result = collect_multi_from(&paths, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..3_000_000];
+    let expected = &golden[(start - 1)..3_000_000];
     assert_eq!(result, expected);
 }
 
@@ -40,9 +40,9 @@ fn multi_new_from_at_file_boundary() {
 fn multi_new_from_mid_second_file() {
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 1_500_000;
+    let start: usize = 1_500_000;
     let result = collect_multi_from(&paths, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..3_000_000];
+    let expected = &golden[(start - 1)..3_000_000];
     assert_eq!(result, expected);
 }
 
@@ -51,9 +51,9 @@ fn multi_new_from_last_file_start() {
     // Start at the beginning of the last file.
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 2_000_001;
+    let start: usize = 2_000_001;
     let result = collect_multi_from(&paths, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..3_000_000];
+    let expected = &golden[(start - 1)..3_000_000];
     assert_eq!(result, expected);
 }
 
@@ -61,7 +61,7 @@ fn multi_new_from_last_file_start() {
 fn multi_new_from_last_digit() {
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 3_000_000;
+    let start: usize = 3_000_000;
     let result = collect_multi_from(&paths, 19, start).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result, &golden[2_999_999..3_000_000]);
@@ -73,9 +73,9 @@ fn multi_new_from_crossing_file_boundary() {
     // into file 1.
     let golden = golden_digits();
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
-    let start: i64 = 999_700; // 300 digits left in file 0, then crosses into file 1
+    let start: usize = 999_700; // 300 digits left in file 0, then crosses into file 1
     let result = collect_multi_from(&paths, 1000, start).unwrap();
-    let expected = &golden[(start as usize - 1)..3_000_000];
+    let expected = &golden[(start - 1)..3_000_000];
     assert_eq!(result, expected);
 }
 
@@ -101,6 +101,34 @@ fn multi_new_from_generated_files() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "64")]
+fn multi_new_from_rejects_range_end_overflowing_usize() {
+    let block_size = (usize::MAX / 2) + 1;
+    let file = TempYcd::final_block("", block_size, 1, 0).unwrap();
+
+    let error = YcdMultiFileStream::new_from(&[&file.path], 19, 1).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "Digit range end overflow");
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn multi_new_from_accepts_i64_max_range_bound() {
+    let file = TempYcd::final_block("", 1, i64::MAX as usize - 1, 0).unwrap();
+
+    let error = YcdMultiFileStream::new_from(&[&file.path], 19, 1).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Start position 1 is outside the available range [{}, {}]",
+            i64::MAX,
+            i64::MAX
+        )
+    );
+}
+
+#[test]
 fn multi_new_from_errors() {
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
     let empty: [&str; 0] = [];
@@ -122,8 +150,9 @@ fn multi_new_from_errors() {
     );
 
     // start_position before list range
+    let later_paths = [one_million_path(1), one_million_path(2)];
     assert_eq!(
-        YcdMultiFileStream::new_from(&paths, 19, -1)
+        YcdMultiFileStream::new_from(&later_paths, 19, 1)
             .unwrap_err()
             .kind(),
         io::ErrorKind::InvalidInput

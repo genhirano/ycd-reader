@@ -1,8 +1,11 @@
 mod common;
 
+use std::io;
+
 use common::{
     collect_single, collect_single_prefix, golden_digits, one_million_path, two_million_path,
 };
+use ycd_reader::YcdSeqBlockStream;
 
 #[test]
 fn individual_real_files_match_the_three_million_digit_golden_file() {
@@ -22,8 +25,15 @@ fn individual_real_files_match_the_three_million_digit_golden_file() {
     assert_eq!(third_million, golden[2_000_000..]);
 }
 
-use std::io;
-use ycd_reader::YcdSeqBlockStream;
+#[test]
+fn sequential_reads_preserve_surplus_across_non_aligned_units() {
+    let digits = "12345678901234567890123456789012345678";
+    let file = common::TempYcd::valid(digits, digits.len(), 0, "\n", "").unwrap();
+
+    let actual = collect_single(&file.path, 23).unwrap();
+
+    assert_eq!(actual, digits);
+}
 
 #[test]
 fn seq_stream_unit_size_larger_than_file() {

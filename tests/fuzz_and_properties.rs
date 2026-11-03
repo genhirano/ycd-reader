@@ -144,20 +144,20 @@ fn random_unit_sizes_stream_invariants() {
     let expected = &golden[..expected_total];
 
     // Test a variety of unit sizes (small, irregular, block multiples, prime numbers)
-    let unit_sizes: &[i32] = &[19, 20, 21, 37, 38, 50, 73, 100, 1000, 7777, 50_000];
+    let unit_sizes: &[usize] = &[19, 20, 21, 37, 38, 50, 73, 100, 1000, 7777, 50_000];
 
     for &unit_size in unit_sizes {
         let mut stream = YcdMultiFileStream::new(&files, unit_size).unwrap();
         let mut collected = String::with_capacity(expected_total);
-        let mut expected_process_no: i64 = 1;
-        let mut expected_start: i64 = 1;
+        let mut expected_process_no: usize = 1;
+        let mut expected_start: usize = 1;
 
         while stream.has_next() {
             let unit = stream.next().unwrap();
             assert_eq!(unit.process_no, expected_process_no);
             assert_eq!(unit.start_digit, expected_start);
             expected_process_no += 1;
-            expected_start += unit.value.len() as i64;
+            expected_start += unit.value.len();
             collected.push_str(&unit.value);
         }
 
@@ -189,9 +189,9 @@ fn random_new_from_positions_match_golden_subranges() {
     const NUM_TRIALS: usize = 50;
     for _ in 0..NUM_TRIALS {
         let start_pos = rng.gen_range(1, total_digits - 1000);
-        let unit_size = rng.gen_range(19, 200) as i32;
+        let unit_size = rng.gen_range(19, 200);
 
-        let mut stream = YcdMultiFileStream::new_from(&files, unit_size, start_pos as i64).unwrap();
+        let mut stream = YcdMultiFileStream::new_from(&files, unit_size, start_pos).unwrap();
         let mut read_digits = String::new();
         let to_read = 500;
 
