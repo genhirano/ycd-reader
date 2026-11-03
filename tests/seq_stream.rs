@@ -21,3 +21,13 @@ fn individual_real_files_match_the_three_million_digit_golden_file() {
     let third_million = collect_single_prefix(two_million_path(1), 65_537, 1_000_000).unwrap();
     assert_eq!(third_million, golden[2_000_000..]);
 }
+
+#[test]
+fn sequential_reads_preserve_surplus_across_non_aligned_units() {
+    let digits = "12345678901234567890123456789012345678";
+    let file = common::TempYcd::valid(digits, digits.len(), 0, "\n", "").unwrap();
+
+    let actual = collect_single(&file.path, 23).unwrap();
+
+    assert_eq!(actual, digits);
+}

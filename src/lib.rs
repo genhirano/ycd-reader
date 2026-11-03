@@ -55,6 +55,7 @@ pub struct YcdSeqBlockStream {
     next_start_digit: i64,
     current_process_unit: Option<YcdProcessUnit>,
     surplus_digit_str: String,
+    surplus_digit_offset: usize,
 }
 
 impl YcdSeqBlockStream {
@@ -75,6 +76,7 @@ impl YcdSeqBlockStream {
             next_start_digit: metadata.digit_start,
             current_process_unit: None,
             surplus_digit_str: String::new(),
+            surplus_digit_offset: 0,
         })
     }
 
@@ -140,19 +142,17 @@ impl YcdSeqBlockStream {
             let mut buffer = [0_u8; 8];
             file_stream.read_exact(&mut buffer)?;
             let number = u64::from_le_bytes(buffer);
-            let digits = format!("{number:019}");
-            if digits.len() != DIGITS_PER_BLOCK {
-                return Err(invalid_data(
-                    "A compressed block contains more than 19 decimal digits",
-                ));
-            }
+            let digits = decode_digit_block(number)?;
 
             let remaining = usize::try_from(metadata.digit_length - decoded_digits)
                 .map_err(|_| invalid_data("Invalid remaining digit count"))?;
             let take = remaining.min(DIGITS_PER_BLOCK);
             decoded_digits += take as i64;
 
-            surplus_digit_str.push_str(&digits[offset_in_block..take]);
+            surplus_digit_str.push_str(
+                std::str::from_utf8(&digits[offset_in_block..take])
+                    .expect("decoded digits are ASCII"),
+            );
         }
 
         Ok(Self {
@@ -165,11 +165,13 @@ impl YcdSeqBlockStream {
             next_start_digit: start_position,
             current_process_unit: None,
             surplus_digit_str,
+            surplus_digit_offset: 0,
         })
     }
 
     pub fn has_next(&self) -> bool {
-        self.decoded_digits < self.digit_length || !self.surplus_digit_str.is_empty()
+        self.decoded_digits < self.digit_length
+            || self.surplus_digit_offset < self.surplus_digit_str.len()
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -199,34 +201,43 @@ impl YcdSeqBlockStream {
     }
 
     fn take_digits(&mut self, maximum: usize) -> io::Result<String> {
-        while self.surplus_digit_str.len() < maximum && self.decoded_digits < self.digit_length {
-            let block = self.read_digit_block()?;
-            self.surplus_digit_str.push_str(&block);
+        while self.surplus_digit_str.len() - self.surplus_digit_offset < maximum
+            && self.decoded_digits < self.digit_length
+        {
+            if self.surplus_digit_offset > 0 {
+                self.surplus_digit_str.drain(..self.surplus_digit_offset);
+                self.surplus_digit_offset = 0;
+            }
+            self.read_digit_block()?;
         }
 
-        let take = maximum.min(self.surplus_digit_str.len());
-        let remainder = self.surplus_digit_str.split_off(take);
-        Ok(std::mem::replace(&mut self.surplus_digit_str, remainder))
+        let available = self.surplus_digit_str.len() - self.surplus_digit_offset;
+        let take = maximum.min(available);
+        let end = self.surplus_digit_offset + take;
+        let digits = self.surplus_digit_str[self.surplus_digit_offset..end].to_owned();
+        self.surplus_digit_offset = end;
+        if self.surplus_digit_offset == self.surplus_digit_str.len() {
+            self.surplus_digit_str.clear();
+            self.surplus_digit_offset = 0;
+        }
+        Ok(digits)
     }
 
-    fn read_digit_block(&mut self) -> io::Result<String> {
+    fn read_digit_block(&mut self) -> io::Result<()> {
         let mut buffer = [0_u8; 8];
         self.file_stream.read_exact(&mut buffer)?;
 
         let number = u64::from_le_bytes(buffer);
-        let digits = format!("{number:019}");
-        if digits.len() != DIGITS_PER_BLOCK {
-            return Err(invalid_data(
-                "A compressed block contains more than 19 decimal digits",
-            ));
-        }
+        let digits = decode_digit_block(number)?;
 
         let remaining = usize::try_from(self.digit_length - self.decoded_digits)
             .map_err(|_| invalid_data("Invalid remaining digit count"))?;
         let take = remaining.min(DIGITS_PER_BLOCK);
+        self.surplus_digit_str
+            .push_str(std::str::from_utf8(&digits[..take]).expect("decoded digits are ASCII"));
         self.decoded_digits += take as i64;
 
-        Ok(digits[..take].to_string())
+        Ok(())
     }
 }
 
@@ -699,12 +710,9 @@ impl YcdIndex {
                 })?;
 
                 let number = u64::from_le_bytes(buf);
-                let block_str = format!("{number:019}");
-                if block_str.len() != DIGITS_PER_BLOCK {
-                    return Err(invalid_data(
-                        "A compressed block contains more than 19 decimal digits",
-                    ));
-                }
+                let block_digits = decode_digit_block(number)?;
+                let block_str =
+                    std::str::from_utf8(&block_digits).expect("decoded digits are ASCII");
 
                 let usable = &block_str[skip..];
                 skip = 0;
@@ -966,12 +974,9 @@ impl YcdFileUtil {
                 })?;
 
                 let number = u64::from_le_bytes(buf);
-                let block_str = format!("{number:019}");
-                if block_str.len() != DIGITS_PER_BLOCK {
-                    return Err(invalid_data(
-                        "A compressed block contains more than 19 decimal digits",
-                    ));
-                }
+                let block_digits = decode_digit_block(number)?;
+                let block_str =
+                    std::str::from_utf8(&block_digits).expect("decoded digits are ASCII");
 
                 // Skip unwanted leading digits in the first block.
                 let usable = &block_str[skip..];
@@ -1003,6 +1008,23 @@ fn validate_unit_size(unit_size: i32) -> io::Result<usize> {
         ));
     }
     Ok(unit_size as usize)
+}
+
+fn decode_digit_block(number: u64) -> io::Result<[u8; DIGITS_PER_BLOCK]> {
+    let mut digits = [b'0'; DIGITS_PER_BLOCK];
+    let mut remaining = number;
+    for digit in digits.iter_mut().rev() {
+        *digit += (remaining % 10) as u8;
+        remaining /= 10;
+    }
+
+    if remaining != 0 {
+        return Err(invalid_data(
+            "A compressed block contains more than 19 decimal digits",
+        ));
+    }
+
+    Ok(digits)
 }
 
 fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
@@ -1215,4 +1237,27 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn no_more_data_error() -> io::Error {
     io::Error::new(io::ErrorKind::UnexpectedEof, "No more data to read")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_digit_block;
+    use std::io;
+
+    #[test]
+    fn decode_digit_block_pads_to_nineteen_digits() {
+        assert_eq!(decode_digit_block(42).unwrap(), *b"0000000000000000042");
+        assert_eq!(
+            decode_digit_block(9_999_999_999_999_999_999).unwrap(),
+            *b"9999999999999999999"
+        );
+    }
+
+    #[test]
+    fn decode_digit_block_rejects_twenty_digits() {
+        assert_eq!(
+            decode_digit_block(u64::MAX).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 }
