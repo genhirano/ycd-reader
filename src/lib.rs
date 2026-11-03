@@ -99,11 +99,7 @@ impl YcdSeqBlockStream {
         let path = file_name.as_ref();
         let metadata = parse_metadata(path)?;
 
-        let file_end = metadata
-            .digit_start
-            .checked_add(metadata.digit_length)
-            .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        let file_end = inclusive_range_end(metadata.digit_start, metadata.digit_length)?;
         if start_position < metadata.digit_start || start_position > file_end {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -139,13 +135,18 @@ impl YcdSeqBlockStream {
         let mut surplus_digit_str = String::new();
 
         if offset_in_block > 0 {
+            let remaining = metadata.digit_length - decoded_digits;
+            let take = remaining.min(DIGITS_PER_BLOCK);
+            let rest_len = take - offset_in_block;
+            surplus_digit_str
+                .try_reserve_exact(rest_len)
+                .map_err(io::Error::other)?;
+
             let mut buffer = [0_u8; 8];
             file_stream.read_exact(&mut buffer)?;
             let number = u64::from_le_bytes(buffer);
             let digits = decode_digit_block(number)?;
 
-            let remaining = metadata.digit_length - decoded_digits;
-            let take = remaining.min(DIGITS_PER_BLOCK);
             decoded_digits += take;
 
             surplus_digit_str.push_str(
@@ -182,14 +183,16 @@ impl YcdSeqBlockStream {
         let process_no = self.next_process_no;
         let start_digit = self.next_start_digit;
 
-        self.next_process_no = self
-            .next_process_no
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("Process number overflow"))?;
-        self.next_start_digit = self
-            .next_start_digit
-            .checked_add(value.len())
-            .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        if self.has_next() {
+            self.next_process_no = self
+                .next_process_no
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("Process number overflow"))?;
+            self.next_start_digit = self
+                .next_start_digit
+                .checked_add(value.len())
+                .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        }
         self.current_process_unit = Some(YcdProcessUnit::new(process_no, start_digit, value));
 
         Ok(self
@@ -212,7 +215,9 @@ impl YcdSeqBlockStream {
         let available = self.surplus_digit_str.len() - self.surplus_digit_offset;
         let take = maximum.min(available);
         let end = self.surplus_digit_offset + take;
-        let digits = self.surplus_digit_str[self.surplus_digit_offset..end].to_owned();
+        let mut digits = String::new();
+        digits.try_reserve_exact(take).map_err(io::Error::other)?;
+        digits.push_str(&self.surplus_digit_str[self.surplus_digit_offset..end]);
         self.surplus_digit_offset = end;
         if self.surplus_digit_offset == self.surplus_digit_str.len() {
             self.surplus_digit_str.clear();
@@ -222,14 +227,18 @@ impl YcdSeqBlockStream {
     }
 
     fn read_digit_block(&mut self) -> io::Result<()> {
+        let remaining = self.digit_length - self.decoded_digits;
+        let take = remaining.min(DIGITS_PER_BLOCK);
+        self.surplus_digit_str
+            .try_reserve(take)
+            .map_err(io::Error::other)?;
+
         let mut buffer = [0_u8; 8];
         self.file_stream.read_exact(&mut buffer)?;
 
         let number = u64::from_le_bytes(buffer);
         let digits = decode_digit_block(number)?;
 
-        let remaining = self.digit_length - self.decoded_digits;
-        let take = remaining.min(DIGITS_PER_BLOCK);
         self.surplus_digit_str
             .push_str(std::str::from_utf8(&digits[..take]).expect("decoded digits are ASCII"));
         self.decoded_digits += take;
@@ -317,11 +326,7 @@ impl YcdMultiFileStream {
         let last = file_infos
             .last()
             .expect("non-empty after collect_file_infos");
-        let list_end = last
-            .file_start
-            .checked_add(last.file_length)
-            .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
+        let list_end = inclusive_range_end(last.file_start, last.file_length)?;
 
         if start_position < list_start || start_position > list_end {
             return Err(io::Error::new(
@@ -334,7 +339,7 @@ impl YcdMultiFileStream {
         }
 
         let start_file_idx =
-            file_infos.partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position);
+            file_infos.partition_point(|fi| fi.file_start + (fi.file_length - 1) < start_position);
 
         let file_names = file_names[start_file_idx..]
             .iter()
@@ -397,14 +402,16 @@ impl YcdMultiFileStream {
 
         let process_no = self.next_process_no;
         let start_digit = self.next_start_digit;
-        self.next_process_no = self
-            .next_process_no
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("Process number overflow"))?;
-        self.next_start_digit = self
-            .next_start_digit
-            .checked_add(value.len())
-            .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        if self.has_next() {
+            self.next_process_no = self
+                .next_process_no
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("Process number overflow"))?;
+            self.next_start_digit = self
+                .next_start_digit
+                .checked_add(value.len())
+                .ok_or_else(|| invalid_data("Digit position overflow"))?;
+        }
         self.current_process_unit = Some(YcdProcessUnit::new(process_no, start_digit, value));
 
         Ok(self
@@ -566,7 +573,7 @@ impl YcdIndex {
     /// |---|---|
     /// | Index is empty, position 0, or length 0 | `InvalidInput` |
     /// | Start or end position outside the indexed range | `InvalidInput` |
-    /// | `start + length` overflows `usize` | `InvalidData` |
+    /// | `start + length - 1` overflows `usize` | `InvalidData` |
     /// | File size or mtime differs from index snapshot | `InvalidData` |
     /// | File does not exist | `NotFound` |
     /// | Payload truncated within logical range | `UnexpectedEof` |
@@ -597,11 +604,7 @@ impl YcdIndex {
 
         let list_start = self.entries[0].file_start;
         let last = self.entries.last().expect("non-empty");
-        let list_end = last
-            .file_start
-            .checked_add(last.file_length)
-            .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
+        let list_end = inclusive_range_end(last.file_start, last.file_length)?;
 
         if one_based_start_position < list_start || one_based_start_position > list_end {
             return Err(io::Error::new(
@@ -613,11 +616,7 @@ impl YcdIndex {
             ));
         }
 
-        let end_position = one_based_start_position
-            .checked_add(length)
-            .ok_or_else(|| invalid_data("End position overflow (start + length)"))?
-            .checked_sub(1)
-            .expect("length >= 1");
+        let end_position = inclusive_range_end(one_based_start_position, length)?;
 
         if end_position > list_end {
             return Err(io::Error::new(
@@ -634,7 +633,7 @@ impl YcdIndex {
 
         let start_idx = self
             .entries
-            .partition_point(|e| e.file_start + e.file_length - 1 < one_based_start_position);
+            .partition_point(|e| e.file_start + (e.file_length - 1) < one_based_start_position);
 
         let mut remaining = length;
 
@@ -860,11 +859,7 @@ impl YcdFileUtil {
         let last = file_infos
             .last()
             .expect("non-empty after collect_file_infos");
-        let list_end = last
-            .file_start
-            .checked_add(last.file_length)
-            .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
+        let list_end = inclusive_range_end(last.file_start, last.file_length)?;
 
         if one_based_start_position < list_start || one_based_start_position > list_end {
             return Err(io::Error::new(
@@ -877,11 +872,7 @@ impl YcdFileUtil {
         }
 
         // end_position is the 1-based index of the last digit we want (inclusive).
-        let end_position = one_based_start_position
-            .checked_add(length)
-            .ok_or_else(|| invalid_data("End position overflow (start + length)"))?
-            .checked_sub(1)
-            .expect("length >= 1 so this cannot underflow");
+        let end_position = inclusive_range_end(one_based_start_position, length)?;
 
         if end_position > list_end {
             return Err(io::Error::new(
@@ -901,8 +892,8 @@ impl YcdFileUtil {
         // partition_point returns the index of the first element for which the predicate is false.
         // We want the first file whose last digit >= one_based_start_position.
         let start_file_idx = file_infos.partition_point(|fi| {
-            // file's last digit = fi.file_start + fi.file_length - 1
-            fi.file_start + fi.file_length - 1 < one_based_start_position
+            // file's last digit = fi.file_start + (fi.file_length - 1)
+            fi.file_start + (fi.file_length - 1) < one_based_start_position
         });
 
         // --- Read from each needed file ---
@@ -1008,6 +999,13 @@ fn validate_unit_size(unit_size: usize) -> io::Result<usize> {
     Ok(unit_size)
 }
 
+fn inclusive_range_end(start: usize, length: usize) -> io::Result<usize> {
+    length
+        .checked_sub(1)
+        .and_then(|span| start.checked_add(span))
+        .ok_or_else(|| invalid_data("Digit range end overflow"))
+}
+
 fn decode_digit_block(number: u64) -> io::Result<[u8; DIGITS_PER_BLOCK]> {
     let mut digits = [b'0'; DIGITS_PER_BLOCK];
     let mut remaining = number;
@@ -1093,6 +1091,7 @@ fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
     let digit_start = digit_offset
         .checked_add(1)
         .ok_or_else(|| invalid_data("Digit position overflow"))?;
+    let _ = inclusive_range_end(digit_start, digit_length)?;
 
     Ok(YcdMetadata {
         header,

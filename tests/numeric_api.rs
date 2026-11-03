@@ -117,6 +117,35 @@ fn digit_positions_near_usize_max_are_preserved() {
         assert_eq!(unit.value, digits);
         assert!(!stream.has_next());
     }
+
+    // Also test a 1-digit file ending at exact `usize::MAX` (`Blocksize = 1`, `BlockID = usize::MAX - 1`).
+    let max_file = TempYcd::valid("7", 1, usize::MAX - 1, "\n", "").unwrap();
+    let max_files = [&max_file.path];
+    let max_index = YcdIndex::build(&max_files).unwrap();
+    assert_eq!(max_index.entries()[0].file_start, usize::MAX);
+    assert_eq!(max_index.read_digits(usize::MAX, 1).unwrap(), "7");
+    assert_eq!(
+        YcdFileUtil::read_digits(&max_files, usize::MAX, 1).unwrap(),
+        "7"
+    );
+    for mut stream in [
+        YcdSeqBlockStream::new(&max_file.path, 19).unwrap(),
+        YcdSeqBlockStream::new_from(&max_file.path, 19, usize::MAX).unwrap(),
+    ] {
+        let unit = stream.next().unwrap();
+        assert_eq!(unit.start_digit, usize::MAX);
+        assert_eq!(unit.value, "7");
+        assert!(!stream.has_next());
+    }
+    for mut stream in [
+        YcdMultiFileStream::new(&max_files, 19).unwrap(),
+        YcdMultiFileStream::new_from(&max_files, 19, usize::MAX).unwrap(),
+    ] {
+        let unit = stream.next().unwrap();
+        assert_eq!(unit.start_digit, usize::MAX);
+        assert_eq!(unit.value, "7");
+        assert!(!stream.has_next());
+    }
 }
 
 #[test]
@@ -130,6 +159,7 @@ fn invalid_digit_metadata_is_rejected_without_wrapping() {
         header.replace("Blocksize:\t19", "Blocksize:\t-19"),
         header.replace("Blocksize:\t19", &format!("Blocksize:\t{}0", usize::MAX)),
         header.replace("BlockID:\t0", &format!("BlockID:\t{}", usize::MAX)),
+        header.replace("BlockID:\t0", &format!("BlockID:\t{}", usize::MAX / 19)),
         header
             .replace("Blocksize:\t19", &format!("Blocksize:\t{}", usize::MAX))
             .replace("BlockID:\t0", "BlockID:\t1"),
