@@ -260,10 +260,10 @@ impl YcdMultiFileStream {
         }
 
         let file_infos = collect_file_infos(file_names)?;
-        let file_names: Vec<PathBuf> = file_names
+        let file_names = file_names
             .iter()
-            .map(|file_name| file_name.as_ref().to_path_buf())
-            .collect();
+            .map(|file_name| std::fs::canonicalize(file_name.as_ref()))
+            .collect::<io::Result<Vec<PathBuf>>>()?;
         let current_stream = Some(YcdSeqBlockStream::new(&file_names[0], unit_size)?);
         let next_start_digit = file_infos[0].file_start;
         Ok(Self {
@@ -336,10 +336,10 @@ impl YcdMultiFileStream {
         let start_file_idx =
             file_infos.partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position);
 
-        let file_names: Vec<PathBuf> = file_names[start_file_idx..]
+        let file_names = file_names[start_file_idx..]
             .iter()
-            .map(|file_name| file_name.as_ref().to_path_buf())
-            .collect();
+            .map(|file_name| std::fs::canonicalize(file_name.as_ref()))
+            .collect::<io::Result<Vec<PathBuf>>>()?;
         let current_stream = Some(YcdSeqBlockStream::new_from(
             &file_names[0],
             unit_size,
