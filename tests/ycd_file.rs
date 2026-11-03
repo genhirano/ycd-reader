@@ -10,7 +10,8 @@ fn real_headers_are_parsed_at_the_exact_data_offset() {
     for block_id in [0, 1, 14] {
         let path = one_million_path(block_id);
         let expected_size = if block_id < 10 { 195 } else { 196 };
-        assert_eq!(YcdFileUtil::get_header_size(&path).unwrap(), expected_size);
+        let header_size: u64 = YcdFileUtil::get_header_size(&path).unwrap();
+        assert_eq!(header_size, expected_size);
 
         let header = YcdFileUtil::get_ycd_header(&path).unwrap();
         assert_eq!(header[&YcdHeaderInfoElem::FileVersion], "1.1.0");
@@ -90,7 +91,7 @@ fn whitespace_padded_end_header_preserves_the_exact_data_offset() {
 
             assert_eq!(
                 YcdFileUtil::get_header_size(&file.path).unwrap(),
-                header.len() as i32
+                header.len() as u64
             );
             assert_eq!(collect_single(&file.path, 19).unwrap(), digits);
         }

@@ -305,8 +305,8 @@ fn consume(_digits: &str) {}
 
 `YcdFileUtil::get_ycd_header` returns recognized header fields, and
 `YcdFileUtil::get_header_size` returns the byte offset at which compressed
-blocks begin. Headers can use CRLF or LF line endings and are not restricted
-to a fixed buffer size.
+blocks begin as a `u64`. Headers can use CRLF or LF line endings and are not
+restricted to a fixed buffer size.
 
 Only base-10 YCD files are supported. Missing or invalid required fields,
 invalid payload blocks, truncated files, and noncontiguous file lists are
