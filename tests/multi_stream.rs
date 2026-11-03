@@ -102,12 +102,73 @@ fn multi_file_stream_joins_generated_files_inside_process_units() {
     );
 }
 
+fn open_fd_count() -> Option<usize> {
+    for dir in ["/proc/self/fd", "/dev/fd"] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            return Some(entries.count());
+        }
+    }
+    None
+}
+
 #[test]
 fn multi_file_streams_open_large_file_lists_without_exhausting_descriptors() {
+    const CHILD_ENV: &str = "YCD_TEST_FD_BOUND_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("multi_file_streams_open_large_file_lists_without_exhausting_descriptors")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
     let files: Vec<_> = (0..1_100)
         .map(|block_id| TempYcd::valid("1", 1, block_id, "\n", "").unwrap())
         .collect();
     let paths: Vec<_> = files.iter().map(|file| &file.path).collect();
+
+    let baseline_fds = open_fd_count();
+
+    for mut stream in [
+        YcdMultiFileStream::new(&paths, 19).unwrap(),
+        YcdMultiFileStream::new_from(&paths, 19, 1).unwrap(),
+    ] {
+        // Exactly one inner YcdSeqBlockStream is active after construction.
+        assert_eq!(
+            format!("{stream:?}").matches("YcdSeqBlockStream").count(),
+            1
+        );
+        if let (Some(base), Some(current)) = (baseline_fds, open_fd_count()) {
+            assert!(
+                current <= base + 2,
+                "Expected at most 1 open YCD file descriptor above baseline {base}, got {current}"
+            );
+        }
+
+        let mut collected = String::with_capacity(files.len());
+        while stream.has_next() {
+            let unit = stream.next().unwrap();
+            collected.push_str(&unit.value);
+            assert!(format!("{stream:?}").matches("YcdSeqBlockStream").count() <= 1);
+            if let (Some(base), Some(current)) = (baseline_fds, open_fd_count()) {
+                assert!(
+                    current <= base + 2,
+                    "Open file descriptors grew during streaming: baseline {base}, current {current}"
+                );
+            }
+        }
+
+        // Once exhausted, no inner YcdSeqBlockStream remains open.
+        assert_eq!(
+            format!("{stream:?}").matches("YcdSeqBlockStream").count(),
+            0
+        );
+        assert_eq!(collected, "1".repeat(files.len()));
+    }
 
     assert_eq!(collect_multi(&paths, 19).unwrap(), "1".repeat(files.len()));
     assert_eq!(
@@ -120,26 +181,81 @@ fn multi_file_streams_open_large_file_lists_without_exhausting_descriptors() {
 fn multi_file_streams_open_subsequent_files_lazily() {
     let first_digits = "1234567890123456789";
     let second_digits = "9876543210987654321";
+
+    for use_new_from in [false, true] {
+        let first = TempYcd::valid(first_digits, 19, 0, "\n", "").unwrap();
+        let second = TempYcd::valid(second_digits, 19, 1, "\n", "").unwrap();
+        let second_path = second.path.clone();
+        let second_bytes = std::fs::read(&second_path).unwrap();
+
+        let mut stream = if use_new_from {
+            YcdMultiFileStream::new_from(&[&first.path, &second_path], 19, 1).unwrap()
+        } else {
+            YcdMultiFileStream::new(&[&first.path, &second_path], 19).unwrap()
+        };
+
+        // Remove the second file after header validation. Because lazy streaming only
+        // keeps the active (first) file open, reading the first file still succeeds
+        // and closes the exhausted first file before attempting to open the second.
+        std::fs::remove_file(&second_path).unwrap();
+
+        assert_eq!(stream.next().unwrap().value, first_digits);
+        assert_eq!(
+            format!("{stream:?}").matches("YcdSeqBlockStream").count(),
+            0
+        );
+        assert!(stream.has_next());
+        assert_eq!(stream.next().unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        // Restoring the second file allows the lazy stream to open and read it.
+        std::fs::write(&second_path, &second_bytes).unwrap();
+        assert_eq!(stream.next().unwrap().value, second_digits);
+        assert_eq!(
+            format!("{stream:?}").matches("YcdSeqBlockStream").count(),
+            0
+        );
+        assert!(!stream.has_next());
+    }
+}
+
+#[test]
+fn multi_file_streams_canonicalize_relative_paths_before_lazy_open() {
+    const CHILD_ENV: &str = "YCD_TEST_CANONICAL_CWD_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("multi_file_streams_canonicalize_relative_paths_before_lazy_open")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let first_digits = "1234567890123456789";
+    let second_digits = "9876543210987654321";
     let first = TempYcd::valid(first_digits, 19, 0, "\n", "").unwrap();
     let second = TempYcd::valid(second_digits, 19, 1, "\n", "").unwrap();
-    let second_path = second.path.clone();
-    let second_bytes = std::fs::read(&second_path).unwrap();
+    let temp_dir = first.path.parent().unwrap().to_path_buf();
+    let rel_paths = [
+        first.path.file_name().unwrap(),
+        second.path.file_name().unwrap(),
+    ];
+    let original_dir = std::env::current_dir().unwrap();
 
-    let mut stream = YcdMultiFileStream::new(&[&first.path, &second_path], 19).unwrap();
-
-    // Remove the second file after header validation. Because lazy streaming only
-    // keeps the active (first) file open, reading the first file still succeeds
-    // and attempting to advance to the missing second file fails with NotFound.
-    std::fs::remove_file(&second_path).unwrap();
+    std::env::set_current_dir(&temp_dir).unwrap();
+    let mut stream = YcdMultiFileStream::new(&rel_paths, 19).unwrap();
+    let mut stream_from = YcdMultiFileStream::new_from(&rel_paths, 19, 1).unwrap();
+    std::env::set_current_dir(&original_dir).unwrap();
 
     assert_eq!(stream.next().unwrap().value, first_digits);
-    assert!(stream.has_next());
-    assert_eq!(stream.next().unwrap_err().kind(), io::ErrorKind::NotFound);
-
-    // Restoring the second file allows the lazy stream to open and read it.
-    std::fs::write(&second_path, &second_bytes).unwrap();
     assert_eq!(stream.next().unwrap().value, second_digits);
     assert!(!stream.has_next());
+
+    assert_eq!(stream_from.next().unwrap().value, first_digits);
+    assert_eq!(stream_from.next().unwrap().value, second_digits);
+    assert!(!stream_from.has_next());
 }
 
 #[test]
