@@ -238,8 +238,14 @@ fn read_digits_error_out_of_range() {
 #[test]
 fn read_digits_error_overflow() {
     let idx = YcdIndex::build(&[one_million_path(0)]).unwrap();
+    // start=1, length=usize::MAX has inclusive end usize::MAX (exceeds list_end -> InvalidInput)
     assert_eq!(
         idx.read_digits(1, usize::MAX).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    // start=2, length=usize::MAX overflows inclusive end (2 + usize::MAX - 1 -> InvalidData)
+    assert_eq!(
+        idx.read_digits(2, usize::MAX).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
 }

@@ -573,7 +573,7 @@ impl YcdIndex {
     /// |---|---|
     /// | Index is empty, position 0, or length 0 | `InvalidInput` |
     /// | Start or end position outside the indexed range | `InvalidInput` |
-    /// | `start + length` overflows `usize` | `InvalidData` |
+    /// | `start + length - 1` overflows `usize` | `InvalidData` |
     /// | File size or mtime differs from index snapshot | `InvalidData` |
     /// | File does not exist | `NotFound` |
     /// | Payload truncated within logical range | `UnexpectedEof` |
@@ -616,11 +616,7 @@ impl YcdIndex {
             ));
         }
 
-        let end_position = one_based_start_position
-            .checked_add(length)
-            .ok_or_else(|| invalid_data("End position overflow (start + length)"))?
-            .checked_sub(1)
-            .expect("length >= 1");
+        let end_position = inclusive_range_end(one_based_start_position, length)?;
 
         if end_position > list_end {
             return Err(io::Error::new(
@@ -876,11 +872,7 @@ impl YcdFileUtil {
         }
 
         // end_position is the 1-based index of the last digit we want (inclusive).
-        let end_position = one_based_start_position
-            .checked_add(length)
-            .ok_or_else(|| invalid_data("End position overflow (start + length)"))?
-            .checked_sub(1)
-            .expect("length >= 1 so this cannot underflow");
+        let end_position = inclusive_range_end(one_based_start_position, length)?;
 
         if end_position > list_end {
             return Err(io::Error::new(

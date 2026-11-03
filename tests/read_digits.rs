@@ -441,10 +441,17 @@ fn read_digits_error_out_of_range() {
 
 #[test]
 fn read_digits_error_overflow() {
-    // start + length overflows usize (start=1, length=usize::MAX)
     let files = [one_million_path(0)];
+    // start=1, length=usize::MAX has inclusive end usize::MAX (exceeds list_end -> InvalidInput)
     assert_eq!(
         YcdFileUtil::read_digits(&files, 1, usize::MAX)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    // start=2, length=usize::MAX overflows inclusive end (2 + usize::MAX - 1 -> InvalidData)
+    assert_eq!(
+        YcdFileUtil::read_digits(&files, 2, usize::MAX)
             .unwrap_err()
             .kind(),
         io::ErrorKind::InvalidData

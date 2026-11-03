@@ -123,6 +123,11 @@ fn digit_positions_near_usize_max_are_preserved() {
     let max_files = [&max_file.path];
     let max_index = YcdIndex::build(&max_files).unwrap();
     assert_eq!(max_index.entries()[0].file_start, usize::MAX);
+    assert_eq!(max_index.read_digits(usize::MAX, 1).unwrap(), "7");
+    assert_eq!(
+        YcdFileUtil::read_digits(&max_files, usize::MAX, 1).unwrap(),
+        "7"
+    );
     for mut stream in [
         YcdSeqBlockStream::new(&max_file.path, 19).unwrap(),
         YcdSeqBlockStream::new_from(&max_file.path, 19, usize::MAX).unwrap(),
