@@ -776,9 +776,8 @@ pub fn compute_seek_params(local_start: usize, length: usize) -> (usize, usize, 
 pub struct YcdFileUtil;
 
 impl YcdFileUtil {
-    pub fn get_header_size<P: AsRef<Path>>(file_name: P) -> io::Result<i32> {
-        i32::try_from(parse_metadata(file_name.as_ref())?.data_offset)
-            .map_err(|_| invalid_data("YCD header is too large"))
+    pub fn get_header_size<P: AsRef<Path>>(file_name: P) -> io::Result<u64> {
+        Ok(parse_metadata(file_name.as_ref())?.data_offset)
     }
 
     pub fn get_ycd_header<P: AsRef<Path>>(
