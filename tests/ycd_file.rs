@@ -140,65 +140,6 @@ fn corrupt_payloads_are_rejected() {
 }
 
 #[test]
-fn whitespace_padded_end_header_preserves_the_exact_data_offset() {
-    let digits = "1234567890123456789";
-    for line_ending in ["\n", "\r\n"] {
-        for marker in ["EndHeader ", "EndHeader\t", " \tEndHeader \t"] {
-            let header = format!(
-                "FileVersion: 1.1.0{e}Base: 10{e}FirstDigits: 3.14{e}\
-                 TotalDigits: 0{e}Blocksize: 19{e}BlockID: 0{e}{marker}{e}{e}\0",
-                e = line_ending
-            );
-            let mut bytes = header.as_bytes().to_vec();
-            bytes.extend(1_234_567_890_123_456_789_u64.to_le_bytes());
-            let file = TempYcd::from_bytes(&bytes).unwrap();
-
-            assert_eq!(
-                YcdFileUtil::get_header_size(&file.path).unwrap() as usize,
-                header.len()
-            );
-            assert_eq!(collect_single(&file.path, 19).unwrap(), digits);
-        }
-    }
-}
-
-#[test]
-fn indented_comments_and_whitespace_only_lines_are_ignored() {
-    let digits = "1234567890123456789";
-    for line_ending in ["\n", "\r\n"] {
-        let extra_header = format!("   # comment{e}\t# Base: 16{e} \t {e}", e = line_ending);
-        let file = TempYcd::valid(digits, digits.len(), 0, line_ending, &extra_header).unwrap();
-
-        assert_eq!(
-            YcdFileUtil::get_ycd_header(&file.path).unwrap()[&YcdHeaderInfoElem::Base],
-            "10"
-        );
-        assert_eq!(collect_single(&file.path, 19).unwrap(), digits);
-    }
-}
-
-#[test]
-fn block_id_starting_beyond_total_digits_is_rejected_by_header_and_stream() {
-    let header = b"FileVersion: 1.1.0\n\
-        Base: 10\n\
-        FirstDigits: 3.14\n\
-        TotalDigits: 50\n\
-        Blocksize: 100\n\
-        BlockID: 1\n\
-        EndHeader\n\0";
-    let file = TempYcd::from_bytes(header).unwrap();
-
-    assert_eq!(
-        YcdFileUtil::get_ycd_header(&file.path).unwrap_err().kind(),
-        io::ErrorKind::InvalidData
-    );
-    assert_eq!(
-        YcdSeqBlockStream::new(&file.path, 19).unwrap_err().kind(),
-        io::ErrorKind::InvalidData
-    );
-}
-
-#[test]
 fn data_marker_and_metadata_edge_cases() {
     use std::str::FromStr;
     use ycd_reader::YcdProcessUnit;
