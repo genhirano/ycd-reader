@@ -115,3 +115,29 @@ fn multi_file_streams_open_large_file_lists_without_exhausting_descriptors() {
         "1".repeat(files.len())
     );
 }
+
+#[test]
+fn multi_file_streams_open_subsequent_files_lazily() {
+    let first_digits = "1234567890123456789";
+    let second_digits = "9876543210987654321";
+    let first = TempYcd::valid(first_digits, 19, 0, "\n", "").unwrap();
+    let second = TempYcd::valid(second_digits, 19, 1, "\n", "").unwrap();
+    let second_path = second.path.clone();
+    let second_bytes = std::fs::read(&second_path).unwrap();
+
+    let mut stream = YcdMultiFileStream::new(&[&first.path, &second_path], 19).unwrap();
+
+    // Remove the second file after header validation. Because lazy streaming only
+    // keeps the active (first) file open, reading the first file still succeeds
+    // and attempting to advance to the missing second file fails with NotFound.
+    std::fs::remove_file(&second_path).unwrap();
+
+    assert_eq!(stream.next().unwrap().value, first_digits);
+    assert!(stream.has_next());
+    assert_eq!(stream.next().unwrap_err().kind(), io::ErrorKind::NotFound);
+
+    // Restoring the second file allows the lazy stream to open and read it.
+    std::fs::write(&second_path, &second_bytes).unwrap();
+    assert_eq!(stream.next().unwrap().value, second_digits);
+    assert!(!stream.has_next());
+}

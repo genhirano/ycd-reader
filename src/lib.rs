@@ -347,10 +347,10 @@ impl YcdMultiFileStream {
     }
 
     pub fn has_next(&self) -> bool {
-        self.current_stream
-            .as_ref()
-            .is_some_and(YcdSeqBlockStream::has_next)
-            || self.current_file < self.file_names.len()
+        match &self.current_stream {
+            Some(stream) => stream.has_next() || self.current_file + 1 < self.file_names.len(),
+            None => self.current_file < self.file_names.len(),
+        }
     }
 
     #[allow(clippy::should_implement_trait)]
