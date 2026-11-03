@@ -327,7 +327,8 @@ impl YcdMultiFileStream {
 
         let file_infos = collect_file_infos(file_names)?;
 
-        let list_start = file_infos[0].file_start as i64;
+        let list_start = i64::try_from(file_infos[0].file_start)
+            .map_err(|_| invalid_data("Digit position overflows i64"))?;
         let last = file_infos
             .last()
             .expect("non-empty after collect_file_infos");
@@ -335,7 +336,9 @@ impl YcdMultiFileStream {
             .file_start
             .checked_add(last.file_length)
             .and_then(|e| e.checked_sub(1))
-            .ok_or_else(|| invalid_data("Digit range end overflow"))? as i64;
+            .ok_or_else(|| invalid_data("Digit range end overflow"))?;
+        let list_end =
+            i64::try_from(list_end).map_err(|_| invalid_data("Digit position overflows i64"))?;
 
         if start_position < list_start || start_position > list_end {
             return Err(io::Error::new(
