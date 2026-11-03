@@ -184,3 +184,29 @@ fn multi_new_from_errors() {
         io::ErrorKind::InvalidInput
     );
 }
+
+#[test]
+fn multi_new_from_last_file_last_digit() {
+    let golden = golden_digits();
+    let paths: Vec<String> = (0..3).map(one_million_path).collect();
+    let mut stream = YcdMultiFileStream::new_from(&paths, 19, 3_000_000).unwrap();
+
+    let u = stream.next().unwrap().clone();
+    assert_eq!(u.process_no, 1);
+    assert_eq!(u.start_digit, 3_000_000);
+    assert_eq!(u.value, &golden[2_999_999..3_000_000]);
+
+    assert!(!stream.has_next());
+    assert_eq!(
+        stream.next().unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+}
+
+#[test]
+fn multi_new_from_debug_impl() {
+    let paths = [one_million_path(0)];
+    let stream = YcdMultiFileStream::new_from(&paths, 19, 1).unwrap();
+    let debug = format!("{stream:?}");
+    assert!(debug.contains("YcdMultiFileStream"));
+}

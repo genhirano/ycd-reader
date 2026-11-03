@@ -141,3 +141,53 @@ fn multi_file_streams_open_subsequent_files_lazily() {
     assert_eq!(stream.next().unwrap().value, second_digits);
     assert!(!stream.has_next());
 }
+
+#[test]
+fn multi_stream_unit_size_spanning_entire_file() {
+    let golden = golden_digits();
+    let paths = [one_million_path(0), one_million_path(1)];
+    let mut stream = YcdMultiFileStream::new(&paths, 1_500_000).unwrap();
+
+    let u1 = stream.next().unwrap().clone();
+    assert_eq!(u1.process_no, 1);
+    assert_eq!(u1.start_digit, 1);
+    assert_eq!(u1.value.len(), 1_500_000);
+    assert_eq!(u1.value, &golden[..1_500_000]);
+
+    let u2 = stream.next().unwrap().clone();
+    assert_eq!(u2.process_no, 2);
+    assert_eq!(u2.start_digit, 1_500_001);
+    assert_eq!(u2.value.len(), 500_000);
+    assert_eq!(u2.value, &golden[1_500_000..2_000_000]);
+
+    assert!(!stream.has_next());
+    assert_eq!(
+        stream.next().unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+}
+
+#[test]
+fn multi_stream_next_without_has_next_and_repeated_eof() {
+    let paths = [one_million_path(0)];
+    let mut stream = YcdMultiFileStream::new(&paths, 1_000_000).unwrap();
+
+    let u1 = stream.next().unwrap().clone();
+    assert_eq!(u1.value.len(), 1_000_000);
+
+    // After exhaustion, next() must return UnexpectedEof repeatedly
+    for _ in 0..5 {
+        assert_eq!(
+            stream.next().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+}
+
+#[test]
+fn multi_stream_debug_impl() {
+    let paths = [one_million_path(0)];
+    let stream = YcdMultiFileStream::new(&paths, 19).unwrap();
+    let debug = format!("{stream:?}");
+    assert!(debug.contains("YcdMultiFileStream"));
+}

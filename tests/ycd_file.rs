@@ -177,3 +177,60 @@ fn corrupt_payloads_are_rejected() {
         io::ErrorKind::InvalidData
     );
 }
+
+#[test]
+fn data_marker_and_metadata_edge_cases() {
+    use std::str::FromStr;
+    use ycd_reader::YcdProcessUnit;
+
+    // YcdHeaderInfoElem traits
+    assert_eq!(YcdHeaderInfoElem::FileVersion.as_ref(), "FileVersion");
+    assert_eq!(
+        YcdHeaderInfoElem::from_str("EndHeader").unwrap(),
+        YcdHeaderInfoElem::EndHeader
+    );
+    assert!(YcdHeaderInfoElem::from_str("UnknownField").is_err());
+
+    // YcdProcessUnit traits
+    let unit = YcdProcessUnit::new(1, 10, "12345".to_string());
+    assert_eq!(unit.clone(), unit);
+    assert!(format!("{unit:?}").contains("12345"));
+
+    let base_header = "FileVersion: 1.1.0\nBase: 10\nFirstDigits: 3.14\nTotalDigits: 0\nBlocksize: 19\nBlockID: 0\nEndHeader\n";
+
+    // Valid data markers: direct NUL, LF+NUL, CRLF+NUL
+    for suffix in [&b"\0"[..], &b"\n\0"[..], &b"\r\n\0"[..]] {
+        let mut bytes = base_header.as_bytes().to_vec();
+        bytes.extend_from_slice(suffix);
+        let f = TempYcd::from_bytes(&bytes).unwrap();
+        assert!(YcdFileUtil::get_ycd_header(&f.path).is_ok());
+    }
+
+    // Invalid data markers after EndHeader: CR+NUL, CR+EOF, LF+non-NUL, non-NUL, EOF
+    for suffix in [&b"\r\0"[..], &b"\r"[..], &b"\n1"[..], &b"X"[..], &b""[..]] {
+        let mut bytes = base_header.as_bytes().to_vec();
+        bytes.extend_from_slice(suffix);
+        let f = TempYcd::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            YcdFileUtil::get_ycd_header(&f.path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    // Non-UTF-8 header, empty FileVersion, empty FirstDigits, Blocksize=0, invalid TotalBlocks
+    let bad_files: &[&[u8]] = &[
+        b"\xff\xfe\nEndHeader\n\0",
+        b"FileVersion:\nBase: 10\nFirstDigits: 3.14\nTotalDigits: 0\nBlocksize: 19\nBlockID: 0\nEndHeader\n\0",
+        b"FileVersion: 1.1.0\nBase: 10\nFirstDigits:\nTotalDigits: 0\nBlocksize: 19\nBlockID: 0\nEndHeader\n\0",
+        b"FileVersion: 1.1.0\nBase: 10\nFirstDigits: 3.14\nTotalDigits: 0\nBlocksize: 0\nBlockID: 0\nEndHeader\n\0",
+        b"FileVersion: 1.1.0\nBase: 10\nFirstDigits: 3.14\nTotalDigits: 0\nTotalBlocks: bad\nBlocksize: 19\nBlockID: 0\nEndHeader\n\0",
+        b"FileVersion: 1.1.0\nBase: 10\nFirstDigits: 3.14\nTotalDigits: 100\nBlocksize: 100\nBlockID: 1\nEndHeader\n\0",
+    ];
+    for bytes in bad_files {
+        let f = TempYcd::from_bytes(bytes).unwrap();
+        assert_eq!(
+            YcdFileUtil::get_ycd_header(&f.path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+}

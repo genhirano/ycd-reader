@@ -129,3 +129,26 @@ fn seq_new_from_errors() {
         io::ErrorKind::InvalidInput
     );
 }
+
+#[test]
+fn seq_new_from_extreme_overflow_positions() {
+    let path = one_million_path(0);
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 19, 0)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 19, i64::MAX as usize)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        YcdSeqBlockStream::new_from(&path, 19, usize::MAX)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+}

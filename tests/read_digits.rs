@@ -644,3 +644,54 @@ fn seek_params_unit_tests() {
     let (bi1, oib1, btr1) = compute_seek_params(0, 14);
     assert_eq!((bi1, oib1, btr1), (0, 0, 1));
 }
+
+#[test]
+fn read_digits_spanning_all_three_files() {
+    let golden = golden_digits();
+    let files = [
+        one_million_path(0),
+        one_million_path(1),
+        one_million_path(2),
+    ];
+
+    let start = 999_995;
+    let len = 1_000_020;
+    let result = YcdFileUtil::read_digits(&files, start, len).unwrap();
+    assert_eq!(result.len(), len);
+    assert_eq!(result, &golden[start - 1..start - 1 + len]);
+}
+
+#[test]
+fn read_digits_entire_three_million() {
+    let golden = golden_digits();
+    let files = [
+        one_million_path(0),
+        one_million_path(1),
+        one_million_path(2),
+    ];
+
+    let result = YcdFileUtil::read_digits(&files, 1, 3_000_000).unwrap();
+    assert_eq!(result.len(), 3_000_000);
+    assert_eq!(result, golden);
+}
+
+#[test]
+fn read_digits_single_digits_at_all_file_edges() {
+    let golden = golden_digits();
+    let files = [
+        one_million_path(0),
+        one_million_path(1),
+        one_million_path(2),
+    ];
+
+    let edge_positions = [1, 1_000_000, 1_000_001, 2_000_000, 2_000_001, 3_000_000];
+
+    for &pos in &edge_positions {
+        let single = YcdFileUtil::read_digits(&files, pos, 1).unwrap();
+        assert_eq!(
+            single,
+            &golden[pos - 1..pos],
+            "Failed at edge position {pos}"
+        );
+    }
+}
