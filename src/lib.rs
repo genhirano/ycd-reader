@@ -54,12 +54,12 @@ pub struct YcdSeqBlockStream {
     process_unit_size: usize,
     file_stream: BufReader<File>,
     digit_length: usize,
-    digit_start: usize,
     decoded_digits: usize,
     next_process_no: usize,
     next_start_digit: usize,
     current_process_unit: Option<YcdProcessUnit>,
     surplus_digit_str: String,
+    surplus_digit_offset: usize,
 }
 
 impl YcdSeqBlockStream {
@@ -74,12 +74,12 @@ impl YcdSeqBlockStream {
             process_unit_size,
             file_stream,
             digit_length: metadata.digit_length,
-            digit_start: metadata.digit_start,
             decoded_digits: 0,
             next_process_no: 1,
             next_start_digit: metadata.digit_start,
             current_process_unit: None,
             surplus_digit_str: String::new(),
+            surplus_digit_offset: 0,
         })
     }
 
@@ -142,35 +142,34 @@ impl YcdSeqBlockStream {
             let mut buffer = [0_u8; 8];
             file_stream.read_exact(&mut buffer)?;
             let number = u64::from_le_bytes(buffer);
-            let digits = format!("{number:019}");
-            if digits.len() != DIGITS_PER_BLOCK {
-                return Err(invalid_data(
-                    "A compressed block contains more than 19 decimal digits",
-                ));
-            }
+            let digits = decode_digit_block(number)?;
 
             let remaining = metadata.digit_length - decoded_digits;
             let take = remaining.min(DIGITS_PER_BLOCK);
             decoded_digits += take;
 
-            surplus_digit_str.push_str(&digits[offset_in_block..take]);
+            surplus_digit_str.push_str(
+                std::str::from_utf8(&digits[offset_in_block..take])
+                    .expect("decoded digits are ASCII"),
+            );
         }
 
         Ok(Self {
             process_unit_size,
             file_stream,
             digit_length: metadata.digit_length,
-            digit_start: metadata.digit_start,
             decoded_digits,
             next_process_no: 1,
             next_start_digit: start_position,
             current_process_unit: None,
             surplus_digit_str,
+            surplus_digit_offset: 0,
         })
     }
 
     pub fn has_next(&self) -> bool {
-        self.decoded_digits < self.digit_length || !self.surplus_digit_str.is_empty()
+        self.decoded_digits < self.digit_length
+            || self.surplus_digit_offset < self.surplus_digit_str.len()
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -200,41 +199,51 @@ impl YcdSeqBlockStream {
     }
 
     fn take_digits(&mut self, maximum: usize) -> io::Result<String> {
-        while self.surplus_digit_str.len() < maximum && self.decoded_digits < self.digit_length {
-            let block = self.read_digit_block()?;
-            self.surplus_digit_str.push_str(&block);
+        while self.surplus_digit_str.len() - self.surplus_digit_offset < maximum
+            && self.decoded_digits < self.digit_length
+        {
+            if self.surplus_digit_offset > 0 {
+                self.surplus_digit_str.drain(..self.surplus_digit_offset);
+                self.surplus_digit_offset = 0;
+            }
+            self.read_digit_block()?;
         }
 
-        let take = maximum.min(self.surplus_digit_str.len());
-        let remainder = self.surplus_digit_str.split_off(take);
-        Ok(std::mem::replace(&mut self.surplus_digit_str, remainder))
+        let available = self.surplus_digit_str.len() - self.surplus_digit_offset;
+        let take = maximum.min(available);
+        let end = self.surplus_digit_offset + take;
+        let digits = self.surplus_digit_str[self.surplus_digit_offset..end].to_owned();
+        self.surplus_digit_offset = end;
+        if self.surplus_digit_offset == self.surplus_digit_str.len() {
+            self.surplus_digit_str.clear();
+            self.surplus_digit_offset = 0;
+        }
+        Ok(digits)
     }
 
-    fn read_digit_block(&mut self) -> io::Result<String> {
+    fn read_digit_block(&mut self) -> io::Result<()> {
         let mut buffer = [0_u8; 8];
         self.file_stream.read_exact(&mut buffer)?;
 
         let number = u64::from_le_bytes(buffer);
-        let digits = format!("{number:019}");
-        if digits.len() != DIGITS_PER_BLOCK {
-            return Err(invalid_data(
-                "A compressed block contains more than 19 decimal digits",
-            ));
-        }
+        let digits = decode_digit_block(number)?;
 
         let remaining = self.digit_length - self.decoded_digits;
         let take = remaining.min(DIGITS_PER_BLOCK);
+        self.surplus_digit_str
+            .push_str(std::str::from_utf8(&digits[..take]).expect("decoded digits are ASCII"));
         self.decoded_digits += take;
 
-        Ok(digits[..take].to_string())
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 pub struct YcdMultiFileStream {
     process_unit_size: usize,
-    streams: Vec<YcdSeqBlockStream>,
-    current_stream: usize,
+    file_names: Vec<PathBuf>,
+    current_stream: Option<YcdSeqBlockStream>,
+    current_file: usize,
     next_process_no: usize,
     next_start_digit: usize,
     current_process_unit: Option<YcdProcessUnit>,
@@ -250,32 +259,18 @@ impl YcdMultiFileStream {
             ));
         }
 
-        let mut streams = Vec::with_capacity(file_names.len());
-        for file_name in file_names {
-            streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
-        }
-
-        for pair in streams.windows(2) {
-            let expected_start = pair[0]
-                .digit_start
-                .checked_add(pair[0].digit_length)
-                .ok_or_else(|| invalid_data("Digit position overflow"))?;
-            if pair[1].digit_start != expected_start {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "YCD files are not contiguous: expected digit {expected_start}, found {}",
-                        pair[1].digit_start
-                    ),
-                ));
-            }
-        }
-
-        let next_start_digit = streams[0].digit_start;
+        let file_infos = collect_file_infos(file_names)?;
+        let file_names: Vec<PathBuf> = file_names
+            .iter()
+            .map(|file_name| file_name.as_ref().to_path_buf())
+            .collect();
+        let current_stream = Some(YcdSeqBlockStream::new(&file_names[0], unit_size)?);
+        let next_start_digit = file_infos[0].file_start;
         Ok(Self {
             process_unit_size,
-            streams,
-            current_stream: 0,
+            file_names,
+            current_stream,
+            current_file: 0,
             next_process_no: 1,
             next_start_digit,
             current_process_unit: None,
@@ -288,7 +283,9 @@ impl YcdMultiFileStream {
     /// `start_position` is the 1-based absolute digit index at which reading
     /// should start.  It must lie within the combined range of all files in
     /// the list.  All files in `file_names` are validated for header
-    /// correctness and list continuity before any payload I/O begins.
+    /// correctness and list continuity before any payload I/O begins. Only
+    /// the file containing `start_position` is opened initially; later files
+    /// are opened as they are reached.
     ///
     /// Files that end before `start_position` are skipped entirely; only the
     /// file that contains `start_position` (and all subsequent files) are
@@ -339,23 +336,21 @@ impl YcdMultiFileStream {
         let start_file_idx =
             file_infos.partition_point(|fi| fi.file_start + fi.file_length - 1 < start_position);
 
-        let mut streams = Vec::with_capacity(file_names.len() - start_file_idx);
-        for (i, file_name) in file_names[start_file_idx..].iter().enumerate() {
-            if i == 0 {
-                streams.push(YcdSeqBlockStream::new_from(
-                    file_name,
-                    unit_size,
-                    start_position,
-                )?);
-            } else {
-                streams.push(YcdSeqBlockStream::new(file_name, unit_size)?);
-            }
-        }
+        let file_names: Vec<PathBuf> = file_names[start_file_idx..]
+            .iter()
+            .map(|file_name| file_name.as_ref().to_path_buf())
+            .collect();
+        let current_stream = Some(YcdSeqBlockStream::new_from(
+            &file_names[0],
+            unit_size,
+            start_position,
+        )?);
 
         Ok(Self {
             process_unit_size,
-            streams,
-            current_stream: 0,
+            file_names,
+            current_stream,
+            current_file: 0,
             next_process_no: 1,
             next_start_digit: start_position,
             current_process_unit: None,
@@ -363,9 +358,10 @@ impl YcdMultiFileStream {
     }
 
     pub fn has_next(&self) -> bool {
-        self.streams[self.current_stream..]
-            .iter()
-            .any(YcdSeqBlockStream::has_next)
+        match &self.current_stream {
+            Some(stream) => stream.has_next() || self.current_file + 1 < self.file_names.len(),
+            None => self.current_file < self.file_names.len(),
+        }
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -378,13 +374,24 @@ impl YcdMultiFileStream {
         value
             .try_reserve_exact(self.process_unit_size)
             .map_err(io::Error::other)?;
-        while value.len() < self.process_unit_size && self.current_stream < self.streams.len() {
+        while value.len() < self.process_unit_size && self.current_file < self.file_names.len() {
+            if self.current_stream.is_none() {
+                self.current_stream = Some(YcdSeqBlockStream::new(
+                    &self.file_names[self.current_file],
+                    self.process_unit_size,
+                )?);
+            }
+
             let remaining = self.process_unit_size - value.len();
-            let stream = &mut self.streams[self.current_stream];
+            let stream = self
+                .current_stream
+                .as_mut()
+                .expect("current stream was opened");
             value.push_str(&stream.take_digits(remaining)?);
 
             if !stream.has_next() {
-                self.current_stream += 1;
+                self.current_stream = None;
+                self.current_file += 1;
             }
         }
 
@@ -702,12 +709,9 @@ impl YcdIndex {
                 })?;
 
                 let number = u64::from_le_bytes(buf);
-                let block_str = format!("{number:019}");
-                if block_str.len() != DIGITS_PER_BLOCK {
-                    return Err(invalid_data(
-                        "A compressed block contains more than 19 decimal digits",
-                    ));
-                }
+                let block_digits = decode_digit_block(number)?;
+                let block_str =
+                    std::str::from_utf8(&block_digits).expect("decoded digits are ASCII");
 
                 let usable = &block_str[skip..];
                 skip = 0;
@@ -720,7 +724,12 @@ impl YcdIndex {
             remaining -= to_take;
         }
 
-        debug_assert_eq!(result.len(), length);
+        if result.len() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Decoded digits length is shorter than requested length",
+            ));
+        }
         Ok(result)
     }
 }
@@ -744,20 +753,31 @@ struct FileInfo {
 /// - `offset_in_block`: digits to skip at the start of the first decoded block.
 /// - `blocks_to_read`: the minimum number of blocks that cover the requested range.
 ///
+/// A zero `length` requires no blocks, regardless of the offset.
+///
 /// This function has no side effects and is exposed for unit-testing the direct-seek logic.
+///
+/// # Panics
+///
+/// Panics if `offset_in_block + length` overflows `usize`.
 pub fn compute_seek_params(local_start: usize, length: usize) -> (usize, usize, usize) {
     let block_index = local_start / DIGITS_PER_BLOCK;
     let offset_in_block = local_start % DIGITS_PER_BLOCK;
-    let blocks_to_read = (offset_in_block + length).div_ceil(DIGITS_PER_BLOCK);
+    if length == 0 {
+        return (block_index, offset_in_block, 0);
+    }
+    let total_digits = offset_in_block
+        .checked_add(length)
+        .expect("offset_in_block + length overflow");
+    let blocks_to_read = total_digits.div_ceil(DIGITS_PER_BLOCK);
     (block_index, offset_in_block, blocks_to_read)
 }
 
 pub struct YcdFileUtil;
 
 impl YcdFileUtil {
-    pub fn get_header_size<P: AsRef<Path>>(file_name: P) -> io::Result<i32> {
-        i32::try_from(parse_metadata(file_name.as_ref())?.data_offset)
-            .map_err(|_| invalid_data("YCD header is too large"))
+    pub fn get_header_size<P: AsRef<Path>>(file_name: P) -> io::Result<u64> {
+        Ok(parse_metadata(file_name.as_ref())?.data_offset)
     }
 
     pub fn get_ycd_header<P: AsRef<Path>>(
@@ -952,12 +972,9 @@ impl YcdFileUtil {
                 })?;
 
                 let number = u64::from_le_bytes(buf);
-                let block_str = format!("{number:019}");
-                if block_str.len() != DIGITS_PER_BLOCK {
-                    return Err(invalid_data(
-                        "A compressed block contains more than 19 decimal digits",
-                    ));
-                }
+                let block_digits = decode_digit_block(number)?;
+                let block_str =
+                    std::str::from_utf8(&block_digits).expect("decoded digits are ASCII");
 
                 // Skip unwanted leading digits in the first block.
                 let usable = &block_str[skip..];
@@ -971,7 +988,12 @@ impl YcdFileUtil {
             remaining -= to_take;
         }
 
-        debug_assert_eq!(result.len(), length);
+        if result.len() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Decoded digits length is shorter than requested length",
+            ));
+        }
         Ok(result)
     }
 }
@@ -984,6 +1006,23 @@ fn validate_unit_size(unit_size: usize) -> io::Result<usize> {
         ));
     }
     Ok(unit_size)
+}
+
+fn decode_digit_block(number: u64) -> io::Result<[u8; DIGITS_PER_BLOCK]> {
+    let mut digits = [b'0'; DIGITS_PER_BLOCK];
+    let mut remaining = number;
+    for digit in digits.iter_mut().rev() {
+        *digit += (remaining % 10) as u8;
+        remaining /= 10;
+    }
+
+    if remaining != 0 {
+        return Err(invalid_data(
+            "A compressed block contains more than 19 decimal digits",
+        ));
+    }
+
+    Ok(digits)
 }
 
 fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
@@ -999,7 +1038,7 @@ fn parse_metadata(path: &Path) -> io::Result<YcdMetadata> {
 
         let text = std::str::from_utf8(&line)
             .map_err(|_| invalid_data("YCD header is not valid UTF-8"))?;
-        let text = text.trim_end_matches(&['\r', '\n'][..]);
+        let text = text.trim();
         if text == YcdHeaderInfoElem::EndHeader.as_ref() {
             break;
         }
@@ -1184,4 +1223,27 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn no_more_data_error() -> io::Error {
     io::Error::new(io::ErrorKind::UnexpectedEof, "No more data to read")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_digit_block;
+    use std::io;
+
+    #[test]
+    fn decode_digit_block_pads_to_nineteen_digits() {
+        assert_eq!(decode_digit_block(42).unwrap(), *b"0000000000000000042");
+        assert_eq!(
+            decode_digit_block(9_999_999_999_999_999_999).unwrap(),
+            *b"9999999999999999999"
+        );
+    }
+
+    #[test]
+    fn decode_digit_block_rejects_twenty_digits() {
+        assert_eq!(
+            decode_digit_block(u64::MAX).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 }

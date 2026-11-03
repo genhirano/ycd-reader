@@ -101,6 +101,34 @@ fn multi_new_from_generated_files() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "64")]
+fn multi_new_from_rejects_range_end_overflowing_usize() {
+    let block_size = (usize::MAX / 2) + 1;
+    let file = TempYcd::final_block("", block_size, 1, 0).unwrap();
+
+    let error = YcdMultiFileStream::new_from(&[&file.path], 19, 1).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "Digit range end overflow");
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn multi_new_from_accepts_i64_max_range_bound() {
+    let file = TempYcd::final_block("", 1, i64::MAX as usize - 1, 0).unwrap();
+
+    let error = YcdMultiFileStream::new_from(&[&file.path], 19, 1).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Start position 1 is outside the available range [{}, {}]",
+            i64::MAX,
+            i64::MAX
+        )
+    );
+}
+
+#[test]
 fn multi_new_from_errors() {
     let paths: Vec<String> = (0..3).map(one_million_path).collect();
     let empty: [&str; 0] = [];
