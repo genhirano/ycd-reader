@@ -741,11 +741,23 @@ struct FileInfo {
 /// - `offset_in_block`: digits to skip at the start of the first decoded block.
 /// - `blocks_to_read`: the minimum number of blocks that cover the requested range.
 ///
+/// A zero `length` requires no blocks, regardless of the offset.
+///
 /// This function has no side effects and is exposed for unit-testing the direct-seek logic.
+///
+/// # Panics
+///
+/// Panics if `offset_in_block + length` overflows `usize`.
 pub fn compute_seek_params(local_start: usize, length: usize) -> (usize, usize, usize) {
     let block_index = local_start / DIGITS_PER_BLOCK;
     let offset_in_block = local_start % DIGITS_PER_BLOCK;
-    let blocks_to_read = (offset_in_block + length).div_ceil(DIGITS_PER_BLOCK);
+    if length == 0 {
+        return (block_index, offset_in_block, 0);
+    }
+    let total_digits = offset_in_block
+        .checked_add(length)
+        .expect("offset_in_block + length overflow");
+    let blocks_to_read = total_digits.div_ceil(DIGITS_PER_BLOCK);
     (block_index, offset_in_block, blocks_to_read)
 }
 
