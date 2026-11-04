@@ -16,11 +16,12 @@ Digit metadata must fit in `usize` on the target platform (32 bits on 32-bit
 targets, 64 bits on 64-bit targets); invalid or overflowing metadata returns
 `InvalidData`.
 
-This is a breaking change for streaming callers: `YcdProcessUnit::new`,
+This is a breaking change for streaming and header-size callers: `YcdProcessUnit::new`,
 `process_no`, `start_digit`, and both streams' `new_from` positions previously
-used `i64`, while `unit_size` used `i32`. Callers can now pass index positions
-and string lengths directly without casts. When migrating signed values, use
-`usize::try_from` to reject negative or out-of-range inputs rather than `as`.
+used `i64`, `unit_size` used `i32`, and `YcdFileUtil::get_header_size` returned
+`i32` (now `u64`). Callers can now pass index positions and string lengths
+directly without casts. When migrating signed values, use `usize::try_from` to
+reject negative or out-of-range inputs rather than `as`.
 The random-access signatures are unchanged.
 
 ## In-memory index: `YcdIndex`
@@ -119,7 +120,7 @@ index.
 | --- | --- |
 | Index is empty, position 0, or length 0 | `InvalidInput` |
 | Start or end position outside indexed range | `InvalidInput` |
-| `start + length` overflows `usize` | `InvalidData` |
+| `start + length - 1` overflows `usize` | `InvalidData` |
 | File size or mtime differs from index snapshot | `InvalidData` |
 | File does not exist | `NotFound` |
 | Payload truncated within logical range | `UnexpectedEof` |
@@ -337,6 +338,9 @@ cargo test
 The integration suite uses
 `tests/ycd/Pi - Dec - Chudnovsky_3000000.txt` as the golden result. It covers:
 
+- `YcdIndex`: index building and `rebuild`, stale-index detection (file size and
+  mtime changes), unopened-file verification via binary search, and equivalence
+  with `YcdFileUtil::read_digits`.
 - `read_digits`: position 1 with various lengths, arbitrary middle positions,
   19-digit block boundaries (before/after/crossing), YCD file boundaries
   (before/after/crossing) in both 1M×3 and 2M+1M layouts, leading zeroes,
@@ -344,11 +348,15 @@ The integration suite uses
   direct-seek unit tests that verify `block_index`, `offset_in_block`, and
   `blocks_to_read` without running full I/O.
 - Sequential streaming: all three million digits with multiple processing-unit
-  sizes, file-boundary crossings, final partial units, and malformed inputs.
+  sizes, file-boundary crossings, lazy file opening and descriptor release,
+  final partial units, and malformed inputs.
 - `new_from` (sequential stream with start position): position-1 equivalence
   with `new`, mid-block seeks, block-boundary seeks, last-digit reads,
   non-zero BlockID files, multi-file boundary and mid-file starts, unit
   crossing file boundaries, and the complete error-contract table.
+- Numeric API and property tests: `usize` boundary values (including
+  `usize::MAX`), cross-API type interchangeability, exhaustive seek-parameter
+  invariants, and randomized range/stream equivalence against the golden file.
 
 The published crates.io package excludes the large `tests/ycd/**` fixture data
 to stay within the upload size limit. Run the full integration suite from a Git
